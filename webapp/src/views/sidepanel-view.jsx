@@ -8,13 +8,14 @@ import FriendRequest from '../widgets/friend-request';
 import AgentStoreModal from '../widgets/agent-store-modal';
 import MobileChannelBindModal from '../widgets/mobile-channel-bind-modal';
 import Avatar from '../widgets/avatar';
-import { Users, UserRound, Zap, Bot, Trash2, MessageSquare, Smartphone, Check, X, Pin, ChevronRight, Plus, Search, MoreHorizontal, UserX, Ban, Folder, FolderOpen, FolderPlus } from 'lucide-react';
+import { Users, UserRound, Zap, Bot, Trash2, MessageSquare, Smartphone, Check, X, Pin, Pencil, ChevronRight, Plus, Search, MoreHorizontal, UserX, Ban, AlertCircle, CheckCircle2, Clock3, LoaderCircle, Folder, FolderOpen, FolderPlus } from 'lucide-react';
 
 const SIDEBAR_COLLAPSED_STORAGE_PREFIX = 'cc_sidebar_collapsed_v1';
 const DEFAULT_COLLAPSED_SECTIONS = { collaboration: false, ai: false, friends: false, groups: false, agents: false, projects: false };
 const PINNED_GROUPS_STORAGE_PREFIX = 'cc_pinned_groups_v1';
 const PINNED_HISTORY_STORAGE_PREFIX = 'cc_pinned_history_v1';
 const HIDDEN_HISTORY_STORAGE_PREFIX = 'cc_hidden_history_v1';
+const TASK_STATUS_DISMISSED_STORAGE_PREFIX = 'cc_task_status_dismissed_v1';
 
 function sidebarCollapsedStorageKey(uid) {
   return `${SIDEBAR_COLLAPSED_STORAGE_PREFIX}:${uid || 'guest'}`;
@@ -30,6 +31,10 @@ function pinnedHistoryStorageKey(uid) {
 
 function hiddenHistoryStorageKey(uid) {
   return `${HIDDEN_HISTORY_STORAGE_PREFIX}:${uid || 'guest'}`;
+}
+
+function taskStatusDismissedStorageKey(uid) {
+  return `${TASK_STATUS_DISMISSED_STORAGE_PREFIX}:${uid || 'guest'}`;
 }
 
 function normalizeCollapsedSections(value) {
@@ -139,6 +144,29 @@ function saveHiddenHistoryIds(uid, next) {
   }
 }
 
+function loadDismissedTaskStatuses(uid) {
+  if (typeof window === 'undefined' || !window.localStorage) return {};
+
+  try {
+    const raw = window.localStorage.getItem(taskStatusDismissedStorageKey(uid));
+    const parsed = raw ? JSON.parse(raw) : {};
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+  } catch (error) {
+    console.warn('Failed to restore dismissed task statuses:', error);
+    return {};
+  }
+}
+
+function saveDismissedTaskStatuses(uid, next) {
+  if (typeof window === 'undefined' || !window.localStorage) return;
+
+  try {
+    window.localStorage.setItem(taskStatusDismissedStorageKey(uid), JSON.stringify(next));
+  } catch (error) {
+    console.warn('Failed to save dismissed task statuses:', error);
+  }
+}
+
 export default function ChatListView({
   activeTopic,
   onSelectTopic,
@@ -175,19 +203,54 @@ export default function ChatListView({
   const [openFriendMenuId, setOpenFriendMenuId] = useState('');
   const [openChatMenuKey, setOpenChatMenuKey] = useState('');
   const [friendActionId, setFriendActionId] = useState('');
+  const [dismissedTaskStatuses, setDismissedTaskStatuses] = useState(() => loadDismissedTaskStatuses(user?.uid));
   const [projectPickerTask, setProjectPickerTask] = useState(null);
   const [showCreateProject, setShowCreateProject] = useState(false);
   const [newProjectName, setNewProjectName] = useState('');
   const [projectActionTopicId, setProjectActionTopicId] = useState('');
   const [expandedProjectId, setExpandedProjectId] = useState(null);
+  const [editingHistoryTopicId, setEditingHistoryTopicId] = useState('');
+  const [historyNameDraft, setHistoryNameDraft] = useState('');
+  const [renamingTopicId, setRenamingTopicId] = useState('');
   const justHiddenHistoryRef = useRef('');
+  const activeTopicRef = useRef(activeTopic);
+  const userUidRef = useRef(user?.uid);
 
   useEffect(() => {
     setCollapsed(loadCollapsedSections(user?.uid));
     setPinnedGroupIds(loadPinnedGroupIds(user?.uid));
     setPinnedHistoryIds(loadPinnedHistoryIds(user?.uid));
     setHiddenHistoryIds(loadHiddenHistoryIds(user?.uid));
+    setDismissedTaskStatuses(loadDismissedTaskStatuses(user?.uid));
   }, [user?.uid]);
+
+  useEffect(() => {
+    activeTopicRef.current = activeTopic;
+  }, [activeTopic]);
+
+  useEffect(() => {
+    userUidRef.current = user?.uid;
+  }, [user?.uid]);
+
+  const rememberDismissedTaskStatus = (topicId, status) => {
+    const normalized = normalizeTaskStatus(status);
+    if (!topicId || !isDismissibleTaskStatus(normalized)) return;
+    const dismissedKey = taskStatusDismissKey(normalized);
+    if (!dismissedKey) return;
+
+    setDismissedTaskStatuses((previous) => {
+      if (previous[topicId] === dismissedKey) return previous;
+      const next = { ...previous, [topicId]: dismissedKey };
+      saveDismissedTaskStatuses(userUidRef.current, next);
+      return next;
+    });
+  };
+
+  useEffect(() => {
+    if (!activeTopic) return;
+    const activeChat = chats.find((chat) => chat.id === activeTopic);
+    if (activeChat?.taskStatus) rememberDismissedTaskStatus(activeTopic, activeChat.taskStatus);
+  }, [activeTopic, chats]);
 
   useEffect(() => {
     if (!openFriendMenuId && !openChatMenuKey) return undefined;
@@ -291,9 +354,7 @@ export default function ChatListView({
       justHiddenHistoryRef.current = '';
     }
     if (!key || justHiddenHistoryRef.current === key || !hiddenHistoryIds.has(key)) return;
-    const reopenedTask = chats.some((chat) => (
-      String(chat.id) === key && chat.isBot && !chat.isGroup
-    ));
+    const reopenedTask = chats.some((chat) => String(chat.id) === key && isHistoryTask(chat));
     if (reopenedTask) restoreHistoryTask(key);
   }, [activeTopic, chats, hiddenHistoryIds]);
 
@@ -385,6 +446,32 @@ export default function ChatListView({
             loadAll();
           }
           return prev;
+        });
+      }
+
+      const taskStatus = normalizeTaskStatus(msg.task_status || msg.ctrl?.params?.task_status);
+      if (taskStatus?.topic_id) {
+        const topicId = taskStatus.topic_id;
+        const updatedAtMs = taskStatusUpdatedMs(taskStatus) || Date.now();
+        const shouldDismissImmediately = isDismissibleTaskStatus(taskStatus) && activeTopicRef.current === topicId;
+        if (shouldDismissImmediately) rememberDismissedTaskStatus(topicId, taskStatus);
+
+        setChats((previous) => {
+          const index = previous.findIndex((chat) => chat.id === topicId);
+          if (index === -1) {
+            if (topicId.startsWith('grp_') || topicId.startsWith('p2p_')) loadAll();
+            return previous;
+          }
+          const currentUpdatedAtMs = taskStatusUpdatedMs(previous[index].taskStatus);
+          if (currentUpdatedAtMs && updatedAtMs < currentUpdatedAtMs) return previous;
+
+          const updated = {
+            ...previous[index],
+            taskStatus,
+            time: formatTime(new Date(updatedAtMs)),
+            lastTimeMs: Math.max(updatedAtMs, previous[index].lastTimeMs || 0),
+          };
+          return [updated, ...previous.filter((_, itemIndex) => itemIndex !== index)];
         });
       }
 
@@ -574,7 +661,7 @@ export default function ChatListView({
     if (!namingAgent || !newChatName.trim()) return;
     const agentId = namingAgent.uid || namingAgent.id;
     try {
-      const res = await api.createGroup(newChatName.trim(), [agentId]);
+      const res = await api.createGroup(newChatName.trim(), [agentId], { kind: 'agent_task' });
       const group = normalizeCreatedGroup(res);
       if (group) {
         const topicId = res.topic || `grp_${group.id}`;
@@ -595,7 +682,7 @@ export default function ChatListView({
   const isSearching = trimmedSearch.length > 0;
   const recentChats = sortConversationsByRecent(chats);
   const visibleRecentChats = recentChats.filter((chat) => (
-    chat.isGroup || !chat.isBot || !hiddenHistoryIds.has(String(chat.id))
+    chat.isAgentTask || !isHistoryTask(chat) || !hiddenHistoryIds.has(String(chat.id))
   ));
   const filteredChats = visibleRecentChats.filter(c => c.name.toLowerCase().includes(lowerSearch));
   const directChats = filteredChats.filter(c => !c.isGroup);
@@ -603,8 +690,8 @@ export default function ChatListView({
   const filteredFriends = friends.filter(f => userSearchText(f).includes(lowerSearch));
   const filteredGroups = mergedGroups.filter(g => g.name.toLowerCase().includes(lowerSearch));
   const filteredAgents = agents.filter(a => userSearchText(a).includes(lowerSearch));
-  const projectTasksById = recentChats.reduce((result, chat) => {
-    if (chat.isGroup || !chat.isBot || !chat.projectId) return result;
+  const projectTasksById = visibleRecentChats.reduce((result, chat) => {
+    if (!isHistoryTask(chat) || !chat.projectId) return result;
     const projectId = Number(chat.projectId);
     const tasks = result.get(projectId) || [];
     tasks.push(chat);
@@ -617,15 +704,20 @@ export default function ChatListView({
   });
 
   const aiChats = sortConversationsWithPins(
-    directChats.filter((chat) => chat.isBot && !chat.projectId && !hiddenHistoryIds.has(String(chat.id))),
+    filteredChats.filter((chat) => (
+      isHistoryTask(chat)
+      && !chat.projectId
+      && (chat.isAgentTask || !hiddenHistoryIds.has(String(chat.id)))
+    )),
     pinnedHistoryIds,
   );
   const friendChats = directChats.filter(c => !c.isBot);
-  const groupChats = sortGroupsWithPins(filteredGroups, pinnedGroupIds);
+  const groupChats = sortGroupsWithPins(filteredGroups.filter((chat) => !chat.isAgentTask), pinnedGroupIds);
   const hasSearchResults = aiChats.length > 0 || friendChats.length > 0 || groupChats.length > 0 || filteredAgents.length > 0 || filteredProjects.length > 0;
   const compactChats = visibleRecentChats.slice(0, 12);
 
   const selectConversation = (chat) => {
+    rememberDismissedTaskStatus(chat.id, chat.taskStatus);
     onSelectTopic({
       topicId: chat.id,
       name: chat.name,
@@ -688,11 +780,12 @@ export default function ChatListView({
     }
   };
 
-  const handleRemoveFromProject = async () => {
-    if (!projectPickerTask?.id) return;
-    setProjectActionTopicId(projectPickerTask.id);
+  const handleRemoveFromProject = async (chat = projectPickerTask) => {
+    if (!chat?.id) return;
+    setOpenChatMenuKey('');
+    setProjectActionTopicId(chat.id);
     try {
-      await api.removeProjectTopic(projectPickerTask.id);
+      await api.removeProjectTopic(chat.id);
       await loadAll();
       closeProjectDialog();
       window.dispatchEvent(new Event('cc:data-changed'));
@@ -748,6 +841,173 @@ export default function ChatListView({
     } finally {
       setDeletingTopicId('');
     }
+  };
+
+  const startRenamingHistoryTask = (chat) => {
+    setOpenChatMenuKey('');
+    setEditingHistoryTopicId(chat.id);
+    setHistoryNameDraft(chat.name);
+  };
+
+  const cancelRenamingHistoryTask = () => {
+    if (renamingTopicId) return;
+    setEditingHistoryTopicId('');
+    setHistoryNameDraft('');
+  };
+
+  const handleRenameHistoryTask = async (event, chat) => {
+    event.preventDefault();
+    event.stopPropagation();
+    const nextName = historyNameDraft.trim();
+    if (!nextName || nextName === chat.name) {
+      cancelRenamingHistoryTask();
+      return;
+    }
+
+    setRenamingTopicId(chat.id);
+    try {
+      if (chat.isAgentTask && chat.groupId) {
+        await api.updateGroup(chat.groupId, nextName, chat.avatar_url || '');
+      } else {
+        await api.updateConversationTitle(chat.id, nextName);
+      }
+      setChats((prev) => prev.map((item) => item.id === chat.id ? { ...item, name: nextName } : item));
+      if (activeTopic === chat.id) {
+        onSelectTopic({ ...topicPayloadForChat(chat), name: nextName });
+      }
+      setEditingHistoryTopicId('');
+      setHistoryNameDraft('');
+      window.dispatchEvent(new Event('cc:data-changed'));
+    } catch (err) {
+      window.alert(err.message || '修改任务名称失败');
+    } finally {
+      setRenamingTopicId('');
+    }
+  };
+
+  const renderTaskCopy = (chat, fallback = null) => (
+    <div className="cc-chat-row-copy">
+      {editingHistoryTopicId === chat.id ? (
+        <form className="cc-history-rename-form" onSubmit={(event) => handleRenameHistoryTask(event, chat)} onClick={(event) => event.stopPropagation()}>
+          <input
+            value={historyNameDraft}
+            onChange={(event) => setHistoryNameDraft(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === 'Escape') {
+                event.preventDefault();
+                cancelRenamingHistoryTask();
+              }
+            }}
+            aria-label={`修改任务名称 ${chat.name}`}
+            maxLength={80}
+            autoFocus
+            disabled={renamingTopicId === chat.id}
+          />
+          <button type="submit" aria-label={`保存任务名称 ${chat.name}`} disabled={!historyNameDraft.trim() || renamingTopicId === chat.id}><Check size={13} /></button>
+          <button type="button" aria-label={`取消修改任务名称 ${chat.name}`} onClick={cancelRenamingHistoryTask} disabled={renamingTopicId === chat.id}><X size={13} /></button>
+        </form>
+      ) : (
+        <>
+          <span className="v3-chat-item-label">{chat.name}</span>
+          <ConversationTaskStatusLine
+            status={visibleTaskStatus(chat.taskStatus, dismissedTaskStatuses, chat.id)}
+            fallback={fallback}
+          />
+        </>
+      )}
+    </div>
+  );
+
+  const renderTaskControls = (chat, menuKey, { showPin = false, showTime = false } = {}) => {
+    const isPinned = pinnedHistoryIds.has(String(chat.id));
+    const removeLabel = onDeleteHistoryTask ? '删除任务' : '从列表移除';
+    return (
+      <>
+        <div className="cc-chat-row-trailing">
+          {showTime && chat.time && <span className="cc-chat-row-time">{chat.time}</span>}
+          <div className="cc-chat-row-actions">
+            {showPin && (
+              <button
+                type="button"
+                className="v3-chat-item-action v3-history-pin-trigger"
+                title={isPinned ? '取消置顶任务' : '置顶任务'}
+                aria-label={`${isPinned ? '取消置顶历史任务' : '置顶历史任务'} ${chat.name}`}
+                aria-pressed={isPinned}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  togglePinnedHistory(chat.id);
+                  setOpenChatMenuKey('');
+                }}
+              >
+                <Pin size={14} fill={isPinned ? 'currentColor' : 'none'} />
+              </button>
+            )}
+            <button
+              type="button"
+              className="v3-chat-item-action v3-history-menu-trigger"
+              title="任务操作"
+              aria-label={`${chat.name} 更多操作`}
+              aria-haspopup="menu"
+              aria-expanded={openChatMenuKey === menuKey}
+              onClick={(event) => {
+                event.stopPropagation();
+                setOpenFriendMenuId('');
+                setOpenChatMenuKey((current) => current === menuKey ? '' : menuKey);
+              }}
+            >
+              <MoreHorizontal size={15} />
+            </button>
+          </div>
+        </div>
+        {openChatMenuKey === menuKey && (
+          <div className="v3-friend-action-menu cc-chat-action-menu" role="menu" onClick={(event) => event.stopPropagation()}>
+            <button type="button" role="menuitem" aria-label={`修改任务名称 ${chat.name}`} onClick={() => startRenamingHistoryTask(chat)}>
+              <Pencil size={14} />
+              <span>修改任务名称</span>
+            </button>
+            <button
+              type="button"
+              role="menuitem"
+              aria-label={`${chat.projectId ? '移动到项目' : '加入项目'} ${chat.name}`}
+              onClick={() => handleOpenProjectPicker(chat)}
+            >
+              <FolderPlus size={14} />
+              <span>{chat.projectId ? '移动到项目' : '加入项目'}</span>
+            </button>
+            {chat.projectId && (
+              <button
+                type="button"
+                role="menuitem"
+                aria-label={`移出当前项目 ${chat.name}`}
+                disabled={projectActionTopicId === chat.id}
+                onClick={() => handleRemoveFromProject(chat)}
+              >
+                <X size={14} />
+                <span>移出当前项目</span>
+              </button>
+            )}
+            <button type="button" role="menuitem" aria-label={`${chat.name} 手机扫码`} onClick={() => handleOpenMobileLink(chat)}>
+              <Smartphone size={14} />
+              <span>手机扫码</span>
+            </button>
+            {!chat.isAgentTask && (
+              <button
+                type="button"
+                role="menuitem"
+                className="danger"
+                aria-label={`${removeLabel} ${chat.name}`}
+                disabled={deletingTopicId === chat.id}
+                title={removeLabel}
+                onClick={() => handleDeleteHistoryTask(chat)}
+              >
+                <Trash2 size={14} />
+                <span>{removeLabel}</span>
+              </button>
+            )}
+          </div>
+        )}
+      </>
+    );
   };
 
   return (
@@ -821,78 +1081,13 @@ export default function ChatListView({
           <div className="cc-sidebar-empty cc-history-empty">点击 + 开始新任务</div>
         ) : (
           aiChats.map((chat) => {
-            const isPinned = pinnedHistoryIds.has(String(chat.id));
             const menuKey = `history:${chat.id}`;
-            const removeLabel = onDeleteHistoryTask ? '删除任务' : '从列表移除';
             return (
               <div key={chat.id} className={`v3-chat-item cc-history-item ${activeTopic === chat.id ? 'active' : ''}`}
-                onClick={() => onSelectTopic({ topicId: chat.id, name: chat.name, isGroup: chat.isGroup, groupId: chat.groupId, avatar_url: chat.avatar_url, friendId: chat.friendId })}>
+                onClick={() => selectConversation(chat)}>
                 <span className="prefix cc-chat-row-icon">{chat.isGroup ? '#' : <MessageSquare size={14} />}</span>
-                <div className="cc-chat-row-copy">
-                  <span className="v3-chat-item-label">{chat.name}</span>
-                  {chat.preview && <span className="cc-chat-row-preview">{chat.preview}</span>}
-                </div>
-                <div className="cc-chat-row-trailing">
-                  {chat.time && <span className="cc-chat-row-time">{chat.time}</span>}
-                  <div className="cc-chat-row-actions">
-                    <button
-                      type="button"
-                      className="v3-chat-item-action v3-history-menu-trigger"
-                      title="任务操作"
-                      aria-label={`${chat.name} 更多操作`}
-                      aria-haspopup="menu"
-                      aria-expanded={openChatMenuKey === menuKey}
-                      onClick={(event) => {
-                        event.stopPropagation();
-                        setOpenFriendMenuId('');
-                        setOpenChatMenuKey((current) => current === menuKey ? '' : menuKey);
-                      }}
-                    >
-                      <MoreHorizontal size={15} />
-                    </button>
-                  </div>
-                </div>
-                {openChatMenuKey === menuKey && (
-                  <div className="v3-friend-action-menu cc-chat-action-menu" role="menu" onClick={(event) => event.stopPropagation()}>
-                    <button
-                      type="button"
-                      role="menuitem"
-                      aria-label={`${isPinned ? '取消置顶历史任务' : '置顶历史任务'} ${chat.name}`}
-                      onClick={() => {
-                        togglePinnedHistory(chat.id);
-                        setOpenChatMenuKey('');
-                      }}
-                    >
-                      <Pin size={14} fill={isPinned ? 'currentColor' : 'none'} />
-                      <span>{isPinned ? '取消置顶任务' : '置顶任务'}</span>
-                    </button>
-                    <button
-                      type="button"
-                      role="menuitem"
-                      aria-label={`${chat.projectId ? '移动到项目' : '加入项目'} ${chat.name}`}
-                      onClick={() => handleOpenProjectPicker(chat)}
-                    >
-                      <FolderPlus size={14} />
-                      <span>{chat.projectId ? '移动到项目' : '加入项目'}</span>
-                    </button>
-                    <button type="button" role="menuitem" aria-label={`${chat.name} 手机扫码`} onClick={() => handleOpenMobileLink(chat)}>
-                      <Smartphone size={14} />
-                      <span>手机扫码</span>
-                    </button>
-                    <button
-                      type="button"
-                      role="menuitem"
-                      className="danger"
-                      aria-label={`${removeLabel} ${chat.name}`}
-                      disabled={deletingTopicId === chat.id}
-                      title={removeLabel}
-                      onClick={() => handleDeleteHistoryTask(chat)}
-                    >
-                      <Trash2 size={14} />
-                      <span>{removeLabel}</span>
-                    </button>
-                  </div>
-                )}
+                {renderTaskCopy(chat, chat.taskStatus ? chat.preview : null)}
+                {renderTaskControls(chat, menuKey, { showPin: true, showTime: true })}
               </div>
             );
           })
@@ -918,7 +1113,7 @@ export default function ChatListView({
             const isOnline = onlineStatusFor(onlineUsers, chat.friendId, chat.isOnline);
             return (
               <div key={chat.id} className={`v3-chat-item v3-friend-chat-item ${activeTopic === chat.id ? 'active' : ''}`}
-                onClick={() => onSelectTopic({ topicId: chat.id, name: chat.name, isGroup: false, avatar_url: chat.avatar_url, friendId: chat.friendId })}>
+                onClick={() => selectConversation(chat)}>
                 <span
                   className={`v3-status-dot ${isOnline ? 'online' : 'offline'}`}
                   style={{marginRight: 8}}
@@ -927,7 +1122,7 @@ export default function ChatListView({
                 />
                 <div className="cc-chat-row-copy">
                   <span className="v3-chat-item-label">{chat.name}</span>
-                  {chat.preview && <span className="cc-chat-row-preview">{chat.preview}</span>}
+                  <ConversationTaskStatusLine status={visibleTaskStatus(chat.taskStatus, dismissedTaskStatuses, chat.id)} fallback={chat.preview} />
                 </div>
                 <div className="cc-chat-row-trailing">
                   {chat.time && <span className="cc-chat-row-time">{chat.time}</span>}
@@ -981,11 +1176,11 @@ export default function ChatListView({
             const menuKey = `group:${chat.id}`;
             return (
               <div key={chat.id} className={`v3-chat-item ${activeTopic === chat.id ? 'active' : ''}`}
-                onClick={() => onSelectTopic({ topicId: chat.id, name: chat.name, isGroup: true, groupId: chat.groupId, avatar_url: chat.avatar_url })}>
+                onClick={() => selectConversation(chat)}>
                 <span className="prefix cc-chat-row-icon">#</span>
                 <div className="cc-chat-row-copy">
                   <span className="v3-chat-item-label">{chat.name}</span>
-                  {chat.preview && <span className="cc-chat-row-preview">{chat.preview}</span>}
+                  <ConversationTaskStatusLine status={visibleTaskStatus(chat.taskStatus, dismissedTaskStatuses, chat.id)} fallback={chat.preview} />
                 </div>
                 <div className="cc-chat-row-trailing">
                   {chat.time && <span className="cc-chat-row-time">{chat.time}</span>}
@@ -1214,18 +1409,21 @@ export default function ChatListView({
                   </div>
                   <span className="cc-project-count" aria-label={`${project.task_count || 0} 个任务`}>{project.task_count || 0}</span>
                 </button>
-                {expanded && (projectTasks.length > 0 ? projectTasks.map((chat) => (
-                  <button
-                    type="button"
-                    key={chat.id}
-                    className={`v3-chat-item cc-project-task-item ${activeTopic === chat.id ? 'active' : ''}`}
-                    aria-label={`打开项目任务 ${chat.name}`}
-                    onClick={() => selectConversation(chat)}
-                  >
-                    <MessageSquare size={13} className="prefix cc-chat-row-icon" />
-                    <span className="v3-chat-item-label">{chat.name}</span>
-                  </button>
-                )) : (
+                {expanded && (projectTasks.length > 0 ? projectTasks.map((chat) => {
+                  const menuKey = `project:${chat.id}`;
+                  return (
+                    <div
+                      key={chat.id}
+                      className={`v3-chat-item cc-project-task-item ${activeTopic === chat.id ? 'active' : ''}`}
+                      aria-label={`打开项目任务 ${chat.name}`}
+                      onClick={() => selectConversation(chat)}
+                    >
+                      <MessageSquare size={13} className="prefix cc-chat-row-icon" />
+                      {renderTaskCopy(chat, chat.preview)}
+                      {renderTaskControls(chat, menuKey)}
+                    </div>
+                  );
+                }) : (
                   <div className="cc-sidebar-empty cc-project-task-empty">暂无任务</div>
                 ))}
               </React.Fragment>
@@ -1295,17 +1493,19 @@ export default function ChatListView({
 
       {projectPickerTask && !showCreateProject && createPortal(
         <div className="name-dialog-overlay cc-new-task-overlay" onClick={closeProjectDialog}>
-          <section className="name-dialog cc-new-task-dialog" role="dialog" aria-modal="true" aria-label="选择项目" onClick={(e) => e.stopPropagation()}>
+          <section className="name-dialog cc-new-task-dialog cc-project-picker-dialog" role="dialog" aria-modal="true" aria-label="选择项目" aria-labelledby="cc-project-picker-title" onClick={(e) => e.stopPropagation()}>
             <header className="cc-new-task-header">
-              <h3>加入项目</h3>
-              <button type="button" className="cc-dialog-close" onClick={closeProjectDialog} aria-label="关闭">
+              <h3 id="cc-project-picker-title">加入项目</h3>
+              <button type="button" className="cc-dialog-close" onClick={closeProjectDialog} aria-label="关闭加入项目">
                 <X size={18} />
               </button>
             </header>
             <div className="cc-new-task-body">
+              <div className="cc-project-picker-target">将“{projectPickerTask.name}”加入项目</div>
               {projects.length === 0 ? (
-                <div className="cc-new-task-empty">
-                  <strong>暂无项目</strong>
+                <div className="cc-new-task-empty cc-project-picker-empty">
+                  <FolderPlus size={20} aria-hidden="true" />
+                  <strong>暂无可用项目</strong>
                   <span>先新建一个项目，再加入当前任务</span>
                 </div>
               ) : (
@@ -1330,7 +1530,7 @@ export default function ChatListView({
                       type="button"
                       className="cc-new-task-agent cc-project-remove-option"
                       disabled={projectActionTopicId === projectPickerTask.id}
-                      onClick={handleRemoveFromProject}
+                      onClick={() => handleRemoveFromProject(projectPickerTask)}
                     >
                       <X size={17} />
                       <span>移出当前项目</span>
@@ -1443,6 +1643,92 @@ function isOwnedAgent(agent) {
   return agent?.is_owner === true || agent?.relation === 'owner';
 }
 
+function ConversationTaskStatusLine({ status, fallback }) {
+  const expiresAtMs = taskStatusExpiresMs(status);
+  const [nowMs, setNowMs] = useState(() => Date.now());
+
+  useEffect(() => {
+    if (!expiresAtMs || expiresAtMs <= Date.now()) return undefined;
+    const timer = window.setTimeout(
+      () => setNowMs(Date.now()),
+      Math.min(expiresAtMs - Date.now() + 50, 2147483647),
+    );
+    return () => window.clearTimeout(timer);
+  }, [expiresAtMs]);
+
+  const normalized = normalizeTaskStatus(status);
+  if (!normalized || normalized.state === 'idle' || (expiresAtMs && expiresAtMs <= nowMs)) {
+    return fallback ? <span className="cc-chat-row-preview">{fallback}</span> : null;
+  }
+
+  const descriptor = taskStatusDescriptor(normalized.state);
+  const Icon = descriptor.icon;
+  const text = normalized.summary || normalized.error || descriptor.label;
+  return (
+    <span className={`cc-task-status-line ${descriptor.className}`} title={text}>
+      <span className="cc-task-status-pill">
+        <Icon size={11} strokeWidth={2.4} />
+        <span>{descriptor.label}</span>
+      </span>
+      {text !== descriptor.label && <span className="cc-task-status-summary">{text}</span>}
+    </span>
+  );
+}
+
+function taskStatusDescriptor(state) {
+  switch (state) {
+    case 'running': return { label: '进行中', className: 'running', icon: LoaderCircle };
+    case 'completed': return { label: '已完成', className: 'completed', icon: CheckCircle2 };
+    case 'failed': return { label: '需处理', className: 'failed', icon: AlertCircle };
+    case 'cancelled': return { label: '已停止', className: 'cancelled', icon: Clock3 };
+    case 'stale': return { label: '超时', className: 'stale', icon: Clock3 };
+    case 'waiting': return { label: '等待中', className: 'waiting', icon: Clock3 };
+    default: return { label: '状态', className: 'idle', icon: Clock3 };
+  }
+}
+
+function normalizeTaskStatus(status) {
+  if (!status || typeof status !== 'object') return null;
+  const state = String(status.state || '').trim().toLowerCase();
+  if (!state) return null;
+  return {
+    ...status,
+    state,
+    summary: String(status.summary || '').trim(),
+    error: String(status.error || '').trim(),
+  };
+}
+
+function isDismissibleTaskStatus(status) {
+  return ['completed', 'failed', 'cancelled', 'stale'].includes(normalizeTaskStatus(status)?.state);
+}
+
+function taskStatusDismissKey(status) {
+  const normalized = normalizeTaskStatus(status);
+  if (!normalized) return '';
+  return [
+    normalized.state,
+    normalized.run_id || normalized.runId || '',
+    normalized.updated_at || normalized.updatedAt || '',
+    normalized.summary || '',
+    normalized.error || '',
+  ].map((value) => String(value)).join('|');
+}
+
+function visibleTaskStatus(status, dismissedTaskStatuses, topicId) {
+  const normalized = normalizeTaskStatus(status);
+  if (!normalized || dismissedTaskStatuses?.[topicId] === taskStatusDismissKey(normalized)) return null;
+  return normalized;
+}
+
+function taskStatusUpdatedMs(status) {
+  return toTimeMs(status?.updated_at || status?.updatedAt);
+}
+
+function taskStatusExpiresMs(status) {
+  return toTimeMs(status?.expires_at || status?.expiresAt);
+}
+
 function conversationSummaryToChat(item) {
   const createdAtMs = toTimeMs(item.created_at);
   const lastTimeMs = toTimeMs(item.last_time) || createdAtMs;
@@ -1459,8 +1745,10 @@ function conversationSummaryToChat(item) {
     avatar_url: item.avatar_url,
     isBot: item.is_bot,
     hasBot: Boolean(item.has_bot || item.is_agent_group),
+    isAgentTask: Boolean(item.is_agent_task || item.kind === 'agent_task'),
     isOnline: item.is_online,
     seq: item.latest_seq || 0,
+    taskStatus: normalizeTaskStatus(item.task_status),
     projectId: item.project_id || 0,
     projectName: item.project_name || '',
   };
@@ -1512,6 +1800,7 @@ function normalizeGroupListItem(item) {
     lastTimeMs,
     createdAtMs,
     seq: item.seq || 0,
+    taskStatus: normalizeTaskStatus(item.taskStatus || item.task_status),
   };
 }
 
@@ -1522,6 +1811,10 @@ function numericGroupIdFromTopic(topicId) {
 
 function sortConversationsByRecent(items) {
   return [...items].sort(conversationRecentLess);
+}
+
+function isHistoryTask(chat) {
+  return Boolean(chat?.isAgentTask || (!chat?.isGroup && chat?.isBot));
 }
 
 function sortConversationsWithPins(items, pinnedTopicIds) {
@@ -1623,6 +1916,8 @@ function normalizeCreatedGroup(created) {
     avatar_url: rawGroup.avatar_url || created.avatar_url || '',
     created_at: rawGroup.created_at || created.created_at || new Date().toISOString(),
     has_bot: rawGroup.has_bot || created.has_bot || false,
+    kind: rawGroup.kind || created.kind || 'standard',
+    is_agent_task: Boolean(rawGroup.is_agent_task || created.is_agent_task),
   };
 }
 
@@ -1639,6 +1934,7 @@ function groupToConversation(group) {
     isGroup: true,
     avatar_url: group.avatar_url,
     hasBot: Boolean(group.has_bot || group.is_agent_group),
+    isAgentTask: Boolean(group.is_agent_task || group.kind === 'agent_task'),
     seq: 0,
   };
 }

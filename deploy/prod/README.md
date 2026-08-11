@@ -11,10 +11,10 @@ root as `/srv/catscompany-prod` so the existing GitHub Actions deployment
 workflow can continue to upload compose, env, and release files to the expected
 location.
 
-The production deploy also reconciles only `proxy_read_timeout` and
-`proxy_send_timeout` inside the TLS `app.catsco.cc` `/v1/` location. It does not
-replace the host site file, so unrelated host-only routes remain intact. The
-update keeps a `.catsco-image-timeout.bak` copy, runs `nginx -t`, and restores
+The production deploy reconciles the dedicated TLS `app.catsco.cc`
+`/api/stt/realtime` WebSocket location and the `/v1/` image proxy timeouts. It
+does not replace the host site file, so unrelated host-only routes remain
+intact. Each update keeps a `.catsco-*.bak` copy, runs `nginx -t`, and restores
 the previous config if validation or reload fails. When the SSH deploy user is
 not root, the updater requires non-interactive passwordless `sudo` and refuses
 to prompt during a deployment.

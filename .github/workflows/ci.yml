@@ -116,10 +116,12 @@ jobs:
         working-directory: services/dreamina-worker
         run: npm test
 
-      - name: Validate host Nginx timeout update
+      - name: Validate host Nginx updates
         run: |
           bash -n deploy/prod/ensure-image-timeout-nginx.sh
           python3 deploy/prod/update-nginx-v1-timeout_test.py
+          bash -n deploy/prod/ensure-stt-websocket-nginx.sh
+          python3 deploy/prod/update-nginx-stt-websocket_test.py
 
       - name: Validate deploy env updates
         run: |

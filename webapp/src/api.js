@@ -797,6 +797,10 @@ export const api = {
     request('PATCH', `/api/bots?uid=${uid}`, { display_name, avatar_url }),
   deleteBot: (uid) => request('DELETE', `/api/bots?uid=${uid}`),
   setBotVisibility: (uid, visibility) => request('PATCH', `/api/bots/visibility?uid=${uid}&v=${visibility}`),
+  setBotSkillsVisibility: (uid, visibility) => request(
+    'PATCH',
+    `/api/bots/skills-visibility?uid=${encodeURIComponent(uid)}&v=${encodeURIComponent(visibility)}`,
+  ),
   getBotModelConfig: (uid, { includeUsage = false } = {}) =>
     request('GET', `/api/bots/model-config?uid=${uid}${includeUsage ? '&include_usage=1' : ''}`),
   updateBotModelConfig: (uid, modelConfig) => request('PATCH', `/api/bots/model-config?uid=${uid}`, modelConfig),

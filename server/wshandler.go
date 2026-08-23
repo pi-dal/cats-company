@@ -128,7 +128,7 @@ func NewHubWithRuntime(db store.Store, rl *RateLimiter, shared sharedRuntimeStat
 		deviceRPC:           newDeviceRPCRouter(defaultDeviceRPCTTL).withSharedRuntime(shared),
 		thinToolRPC:         newThinToolRPCRouter(defaultThinToolRPCTTL),
 		groupTurns:          newGroupAgentTurnTracker(defaultGroupAgentTurnTTL),
-		agentPush:           newAgentPushTurnCoordinator(),
+		agentPush:           newHubAgentPushTurnCoordinator(),
 		taskGrace:           90 * time.Second,
 		taskReaperInterval:  30 * time.Second,
 		botConnectionEpochs: make(map[int64]uint64),
@@ -2033,18 +2033,7 @@ func (h *Hub) notifyOfflineUserForMessage(uid, senderUID int64, msg *ServerMessa
 		return
 	}
 	deliver := func() bool { return h.enqueueOfflineUserPush(uid, topic, body) }
-	if !isCompletedAgentMessage(msg) {
-		if h.agentPush.observeVisibleMessage(uid, senderUID, msg, deliver) {
-			return
-		}
-		if key := agentPushTurnKey(uid, senderUID, msg); key != "" {
-			h.agentPush.deliverOnce(key, deliver)
-		} else {
-			deliver()
-		}
-		return
-	}
-	h.agentPush.deliverOnce(agentPushTurnKey(uid, senderUID, msg), deliver)
+	h.agentPush.observeVisibleMessage(uid, senderUID, msg, deliver)
 }
 
 func pushNotificationMessageBody(msg *ServerMessage) string {

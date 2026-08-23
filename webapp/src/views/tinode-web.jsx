@@ -45,7 +45,7 @@ import {
   syncThemeColor,
   verifyLiquidThemePassword,
 } from '../utils/theme-access';
-import { Cloud, Download, Frown, KeyRound, Laptop, Package, Settings, Settings2, LogOut, Eye, EyeOff, PanelLeftClose, PanelLeftOpen } from 'lucide-react';
+import { Cloud, Download, Frown, KeyRound, Laptop, Package, Settings, Settings2, LogOut, Eye, EyeOff, PanelLeftClose, PanelLeftOpen, Search } from 'lucide-react';
 
 const RelayAdminPanel = lazy(() => import('./relay-admin-panel'));
 const ChatListView = lazy(() => import('./sidepanel-view'));
@@ -1070,20 +1070,34 @@ function TinodeWebApp() {
             <span className="catsco-brand-mark" aria-hidden="true" />
             <span className="catsco-brand-name">CatsCo</span>
           </div>
-          <button
-            className="v3-sidebar-collapse-btn"
-            type="button"
-            onClick={toggleAppSidebar}
-            aria-label={appSidebarCollapsed ? '展开左侧栏' : '收起左侧栏'}
-            title={appSidebarCollapsed ? '展开左侧栏' : '收起左侧栏'}
-          >
-            {appSidebarCollapsed ? (
-              <>
-                <span className="catsco-brand-mark v3-collapsed-brand-icon" aria-hidden="true" />
-                <PanelLeftClose size={18} className="v3-collapsed-expand-icon" aria-hidden="true" />
-              </>
-            ) : <PanelLeftClose size={18} />}
-          </button>
+          <div className="v3-sidebar-header-actions">
+            {!appSidebarCollapsed && (
+              <button
+                className="v3-sidebar-collapse-btn v3-sidebar-header-search-btn"
+                type="button"
+                onClick={() => setSearchOpen(true)}
+                aria-label="打开全局搜索"
+                aria-keyshortcuts="Control+K Meta+K"
+                title="搜索"
+              >
+                <Search size={18} aria-hidden="true" />
+              </button>
+            )}
+            <button
+              className="v3-sidebar-collapse-btn"
+              type="button"
+              onClick={toggleAppSidebar}
+              aria-label={appSidebarCollapsed ? '展开左侧栏' : '收起左侧栏'}
+              title={appSidebarCollapsed ? '展开左侧栏' : '收起左侧栏'}
+            >
+              {appSidebarCollapsed ? (
+                <>
+                  <span className="catsco-brand-mark v3-collapsed-brand-icon" aria-hidden="true" />
+                  <PanelLeftClose size={18} className="v3-collapsed-expand-icon" aria-hidden="true" />
+                </>
+              ) : <PanelLeftClose size={18} />}
+            </button>
+          </div>
         </div>
         
         <div className="cc-sidebar-content-shell">
@@ -1394,6 +1408,7 @@ function SidebarContent({
   activeTopic,
   onSelectTopic,
   onOpenSearch,
+  additionalSidebarTools,
   onStartAgentTask,
   user,
   onlineUsers,
@@ -1405,12 +1420,29 @@ function SidebarContent({
       activeTopic={activeTopic}
       onSelectTopic={onSelectTopic}
       onOpenSearch={onOpenSearch}
+      additionalSidebarTools={additionalSidebarTools}
       onStartAgentTask={onStartAgentTask}
       user={user}
       onlineUsers={onlineUsers}
       compact={compact}
       onManageGroup={onManageGroup}
     />
+  );
+}
+
+function SkillHubSidebarButton({ active, onClick }) {
+  return (
+    <button
+      type="button"
+      className={`cc-sidebar-primary cc-sidebar-skillhub-entry${active ? ' active' : ''}`}
+      onClick={onClick}
+      aria-label="打开 SkillHub"
+      aria-current={active ? 'page' : undefined}
+      title="SkillHub"
+    >
+      <Package size={17} />
+      <span>SkillHub</span>
+    </button>
   );
 }
 

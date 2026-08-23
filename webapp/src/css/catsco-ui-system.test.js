@@ -177,6 +177,40 @@ describe('CatsCo shell styling', () => {
     );
   });
 
+  it('crops only ultra-wide video thumbnails to a compact, useful viewport while previews retain the source', () => {
+    const videoContainerRule = ruleFor('.v3-message .oc-rich-video');
+    const croppedVideoContainerRule = ruleFor('.v3-message .oc-rich-video.is-ultrawide');
+    const triggerRule = ruleFor('.v3-message .oc-rich-video-trigger');
+    const croppedTriggerRule = ruleFor('.v3-message .oc-rich-video.is-ultrawide .oc-rich-video-trigger');
+    const thumbnailRule = ruleFor('.v3-message .oc-rich-video-thumb');
+    const croppedThumbnailRule = ruleFor('.v3-message .oc-rich-video.is-ultrawide .oc-rich-video-thumb');
+
+    expect(videoContainerRule).toContain('width: fit-content;');
+    expect(croppedVideoContainerRule).toContain('width: min(240px, 100%);');
+    expect(triggerRule).toContain('width: fit-content;');
+    expect(croppedTriggerRule).toContain('width: 100%;');
+    expect(croppedTriggerRule).toContain('aspect-ratio: 16 / 9;');
+    expect(thumbnailRule).toContain('object-fit: contain;');
+    expect(croppedThumbnailRule).toContain('width: 100%;');
+    expect(croppedThumbnailRule).toContain('height: 100%;');
+    expect(croppedThumbnailRule).toContain('object-fit: cover;');
+    expect(croppedThumbnailRule).toContain('object-position: center;');
+    expect(ruleFor('.oc-rich-video-preview .oc-rich-video-player')).toContain('object-fit: contain;');
+  });
+
+  it('keeps inline audio playback compact, keyboard-reachable, and downloadable', () => {
+    const audioRule = ruleFor('.v3-message .oc-rich-audio');
+    const playerRule = ruleFor('.v3-message .oc-rich-audio-player');
+    const downloadRule = ruleFor('.v3-message .oc-rich-audio-download');
+
+    expect(audioRule).toContain('width: min(390px, 100%);');
+    expect(audioRule).toContain('background: var(--cc-panel);');
+    expect(playerRule).toContain('width: 100%;');
+    expect(downloadRule).toContain('min-height: 34px;');
+    expect(ruleFor('.v3-message .oc-rich-audio-download:focus-visible'))
+      .toContain('outline: 2px solid var(--cc-focus-ring);');
+  });
+
   it('keeps expanded chat images fully visible in the viewport', () => {
     const previewRule = ruleIn(openchatCss, '.oc-rich-image-preview');
     const imageRule = ruleIn(openchatCss, '.oc-rich-image-preview-media');
@@ -190,6 +224,16 @@ describe('CatsCo shell styling', () => {
     expect(ruleIn(openchatCss, '.oc-rich-image-trigger')).toContain('cursor: zoom-in;');
     expect(ruleIn(openchatCss, '.oc-rich-image-trigger:focus-visible'))
       .toContain('outline: 2px solid var(--v3-primary);');
+  });
+
+  it('provides a touch-sized, keyboard-visible download action in media previews', () => {
+    const downloadRule = ruleFor('.oc-rich-media-preview-download');
+
+    expect(downloadRule).toContain('width: 44px;');
+    expect(downloadRule).toContain('height: 44px;');
+    expect(downloadRule).toContain('right: 76px;');
+    expect(ruleFor('.oc-rich-media-preview-download:focus-visible'))
+      .toContain('outline: 2px solid var(--cc-focus-ring);');
   });
 
   it('standardizes scrollbar tiers, states, and browser-specific rendering', () => {
@@ -247,6 +291,8 @@ describe('CatsCo shell styling', () => {
     );
     expect(timelineRule).toContain('--cc-scrollbar-size: var(--cc-scrollbar-page-size);');
     expect(timelineRule).toContain('--cc-scrollbar-inset: 1.5px;');
+    expect(timelineRule).toContain('overscroll-behavior-y: contain;');
+    expect(timelineRule).toContain('overflow-anchor: none;');
     expect(inlineRule).toContain('--cc-scrollbar-size: var(--cc-scrollbar-inline-size);');
     expect(inlineRule).toContain('--cc-scrollbar-inset: 1.5px;');
     expect(listRule).toContain('--cc-scrollbar-size: var(--cc-scrollbar-sidebar-size);');
@@ -653,6 +699,30 @@ describe('CatsCo shell styling', () => {
     expect(css).not.toContain('.cc-history-item .cc-chat-row-actions');
   });
 
+  it('keeps task status visible beside touch-friendly mobile actions', () => {
+    expect(css).toContain(`@media (hover: none), (pointer: coarse) {
+  .v3-chat-list {
+    --cc-sidebar-row-height: 44px;
+    --cc-sidebar-action-size: 40px;
+    --cc-sidebar-trailing-width: 84px;
+  }
+
+  .cc-chat-row-trailing .cc-chat-row-time {
+    opacity: 0;
+  }
+
+  .cc-history-item .cc-chat-row-trailing {
+    flex-basis: 108px;
+    width: 108px;
+    min-width: 108px;
+  }
+
+  .cc-history-item .cc-chat-row-trailing > .cc-task-row-status {
+    right: calc((var(--cc-sidebar-action-size) * 2) + 4px);
+    opacity: 1;
+  }`);
+  });
+
   it('makes top-level sidebar section titles distinct from expanded items', () => {
     expect(ruleFor('.cc-top-level-section')).toContain('font-weight: 600;');
     expect(ruleFor('.cc-history-section')).toContain('font-weight: 500;');
@@ -819,6 +889,15 @@ describe('CatsCo shell styling', () => {
     expect(css).toContain('.v3-sidebar:not(.collapsed) {\n    position: fixed;');
     expect(css).toContain('flex-basis: min(86vw, 300px);\n    box-shadow: none;');
     expect(css).toContain('.v3-sidebar:not(.collapsed).open {\n    box-shadow: 16px 0 40px rgba(0, 0, 0, 0.34);');
+  });
+
+  it('places the mobile composer closer to the safe-area edge', () => {
+    expect(css).toContain(`  .v3-composer {
+    padding: 8px 8px calc(12px + env(safe-area-inset-bottom));
+  }`);
+    expect(css).toContain(`  .v3-composer.cc-empty-composer-wrap {
+    position: fixed;`);
+    expect(css).toContain('padding: 8px 8px calc(12px + env(safe-area-inset-bottom));');
   });
 
   it('zooms compact task artwork without resizing its button and shows a fixed label', () => {

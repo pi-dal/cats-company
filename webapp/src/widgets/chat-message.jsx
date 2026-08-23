@@ -1,6 +1,6 @@
 import React, { memo, useEffect, useId, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { ArrowLeft, ChevronDown, ChevronRight, Terminal, Brain, MessageSquareText, FileText, FileCode2, Download, ExternalLink, CornerUpLeft, Pencil, X, Eye, Copy, RotateCcw, CheckCircle2, CircleDot, Circle, Play } from 'lucide-react';
+import { ArrowLeft, ChevronDown, ChevronRight, Terminal, Brain, MessageSquareText, FileText, FileCode2, Download, ExternalLink, CornerUpLeft, Pencil, X, Eye, Copy, RotateCcw, CheckCircle2, CircleDot, Circle, Play, Volume2 } from 'lucide-react';
 import t from '../i18n';
 import Avatar from './avatar';
 import { resolveMediaURL } from '../api';
@@ -210,6 +210,9 @@ function contentBlockCopyText(block) {
   }
   if (block.type === 'image') {
     return `[图片] ${payload.name || payload.url || '图片'}`;
+  }
+  if (block.type === 'audio' || block.type === 'voice') {
+    return `[语音] ${payload.name || payload.url || '语音消息'}`;
   }
   return '';
 }
@@ -923,7 +926,7 @@ function ChatMessageComponent({ message, workingMessages = null, workingOnly = f
   }, [effectiveWorkingMessages, storedBlocks]);
   const workingPlanComplete = isPlanComplete(latestWorkingPlan(workingBlocks));
   const richBlocks = useMemo(() => (
-    storedBlocks.filter((block) => block.type === 'image' || block.type === 'file')
+    storedBlocks.filter((block) => ['image', 'file', 'audio', 'voice'].includes(block.type))
   ), [storedBlocks]);
   const storedTextBlocks = useMemo(() => (
     storedBlocks.filter(
@@ -949,7 +952,9 @@ function ChatMessageComponent({ message, workingMessages = null, workingOnly = f
     && !message._streaming
   );
   const hasFileOnly = !hasText && richBlocks.length > 0 && richBlocks.every(
-    (block) => block.type === 'file' && !isInlineVideoFile(block.payload),
+    (block) => (block.type === 'file' || block.type === 'audio' || block.type === 'voice')
+      && !isInlineVideoFile(block.payload)
+      && !isInlineAudioFile(block.payload),
   );
 
   const parsed = useMemo(() => {
@@ -1472,6 +1477,9 @@ function RichContent({ content, onPreviewFile, activePreviewFile }) {
       return <ImageContent payload={content.payload} />;
     case 'file':
       return <FileContent payload={content.payload} onPreviewFile={onPreviewFile} activePreviewFile={activePreviewFile} />;
+    case 'audio':
+    case 'voice':
+      return <AudioContent payload={content.payload} onPreviewFile={onPreviewFile} activePreviewFile={activePreviewFile} />;
     case 'link_preview':
       return <LinkPreviewContent payload={content.payload} />;
     case 'card':
@@ -1487,6 +1495,8 @@ function ImageContent({ payload }) {
   const triggerRef = useRef(null);
   const closeButtonRef = useRef(null);
   const src = payload?.url || payload?.thumbnail;
+  const resolvedSrc = resolveMediaURL(payload?.url || src);
+  const downloadURL = downloadableMediaURL(resolvedSrc);
 
   useEffect(() => {
     if (!expanded) return undefined;
@@ -1543,8 +1553,20 @@ function ImageContent({ payload }) {
       >
         <X size={20} />
       </button>
+      <a
+        aria-label={`下载图片 ${payload.name || ''}`.trim()}
+        className="oc-rich-media-preview-download"
+        download={payload.name || true}
+        href={downloadURL || undefined}
+        onClick={(event) => event.stopPropagation()}
+        rel="noopener noreferrer"
+        target="_blank"
+        title="下载图片"
+      >
+        <Download size={20} />
+      </a>
       <img
-        src={resolveMediaURL(payload.url || src)}
+        src={resolvedSrc}
         alt={payload.name ? `${payload.name} preview` : 'image preview'}
         className="oc-rich-image-preview-media"
         onClick={(event) => event.stopPropagation()}
@@ -1602,8 +1624,21 @@ const INLINE_VIDEO_MIME_TYPES = new Set([
   'video/quicktime',
 ]);
 
+const INLINE_AUDIO_EXTENSIONS = new Set(['MP3', 'OGG', 'WAV']);
+const INLINE_AUDIO_MIME_TYPES = new Set([
+  'audio/mpeg',
+  'audio/mp3',
+  'audio/ogg',
+  'audio/wav',
+  'audio/x-wav',
+]);
+
 function isInlineVideoFile(payload, ext = fileExtension(payload)) {
   return INLINE_VIDEO_EXTENSIONS.has(ext) || INLINE_VIDEO_MIME_TYPES.has(fileMimeType(payload));
+}
+
+function isInlineAudioFile(payload, ext = fileExtension(payload)) {
+  return INLINE_AUDIO_EXTENSIONS.has(ext) || INLINE_AUDIO_MIME_TYPES.has(fileMimeType(payload));
 }
 
 function isHtmlFile(payload, ext = fileExtension(payload)) {
@@ -1703,12 +1738,15 @@ function fetchableMediaURL(url) {
   }
 }
 
-function downloadableMediaURL(url, fileName) {
-  if (!url || !fileName) return url || '';
+function downloadableMediaURL(url) {
+  if (!url) return '';
   try {
     const urlObj = new URL(url, window.location.origin);
     const mediaOrigin = new URL(resolveMediaURL('/'), window.location.origin).origin;
-    if (urlObj.origin !== mediaOrigin || !urlObj.pathname.startsWith('/uploads/files/')) {
+    if (
+      urlObj.origin !== mediaOrigin
+      || !/^\/uploads\/(files|images)\//.test(urlObj.pathname)
+    ) {
       return url;
     }
     urlObj.searchParams.set('download', '1');
@@ -1732,7 +1770,9 @@ function isTrustedPreviewURL(url) {
       urlObj.origin === mediaOrigin ||
       (isLocalDev && urlObj.hostname.endsWith('catsco.cc'))
     );
-    const trustedPath = /^\/uploads\/(files|images|feedback)\//.test(urlObj.pathname) ||
+    const trustedUploadPath = /^\/uploads\/(files|images|feedback)\//.test(urlObj.pathname);
+    const trustedShareAssetPath = /^\/api\/shared-conversations\/[A-Za-z0-9_-]{43}\/assets\/[a-f0-9]{32}$/.test(urlObj.pathname);
+    const trustedPath = trustedUploadPath || trustedShareAssetPath ||
       (isLocalDev && urlObj.pathname.startsWith('/demo-artifacts/'));
     return trustedOrigin && trustedPath;
   } catch (e) {
@@ -1780,7 +1820,7 @@ export function previewFileDescriptor(payload) {
     isSameOriginRemoteArtifact,
     spreadsheetKind,
     canPreview,
-    downloadURL: downloadableMediaURL(url, payload.name),
+    downloadURL: downloadableMediaURL(url),
     sizeStr: payload.size ? formatFileSize(payload.size) : '',
     key: `${url}|${payload.name || ''}|${payload.size || ''}`,
   };
@@ -1793,16 +1833,19 @@ function spreadsheetPreviewTooLargeMessage() {
 function VideoContent({ payload, onPreviewFile, activePreviewFile }) {
   const [playbackFailed, setPlaybackFailed] = useState(false);
   const [previewOpen, setPreviewOpen] = useState(false);
+  const [cropThumbnail, setCropThumbnail] = useState(false);
   const previewRef = useRef(null);
   const triggerRef = useRef(null);
   const closeButtonRef = useRef(null);
   const fallbackActionRef = useRef(null);
   const shouldFocusFallbackRef = useRef(false);
   const src = resolveMediaURL(payload?.url);
+  const downloadURL = downloadableMediaURL(src);
 
   useEffect(() => {
     setPlaybackFailed(false);
     setPreviewOpen(false);
+    setCropThumbnail(false);
   }, [src]);
 
   useEffect(() => {
@@ -1854,6 +1897,11 @@ function VideoContent({ payload, onPreviewFile, activePreviewFile }) {
     setPlaybackFailed(true);
   };
 
+  const handleThumbnailMetadata = (event) => {
+    const { videoHeight, videoWidth } = event.currentTarget;
+    setCropThumbnail(videoHeight > 0 && videoWidth / videoHeight > 2.2);
+  };
+
   if (!payload || !src || playbackFailed) {
     return (
       <div className="oc-rich-video-fallback">
@@ -1874,7 +1922,7 @@ function VideoContent({ payload, onPreviewFile, activePreviewFile }) {
   }
 
   return (
-    <div className="oc-rich-image oc-rich-video">
+    <div className={`oc-rich-image oc-rich-video${cropThumbnail ? ' is-ultrawide' : ''}`}>
       <button
         aria-label={`预览视频 ${payload.name || ''}`.trim()}
         className="oc-rich-video-trigger"
@@ -1887,6 +1935,7 @@ function VideoContent({ payload, onPreviewFile, activePreviewFile }) {
           className="oc-rich-video-thumb"
           muted
           onError={handlePlaybackError}
+          onLoadedMetadata={handleThumbnailMetadata}
           playsInline
           preload="metadata"
           src={src}
@@ -1913,6 +1962,18 @@ function VideoContent({ payload, onPreviewFile, activePreviewFile }) {
           >
             <X size={20} />
           </button>
+          <a
+            aria-label={`下载视频 ${payload.name || ''}`.trim()}
+            className="oc-rich-media-preview-download"
+            download={payload.name || true}
+            href={downloadURL || undefined}
+            onClick={(event) => event.stopPropagation()}
+            rel="noopener noreferrer"
+            target="_blank"
+            title="下载视频"
+          >
+            <Download size={20} />
+          </a>
           <video
             aria-label={payload.name || '视频'}
             autoPlay
@@ -1933,9 +1994,88 @@ function VideoContent({ payload, onPreviewFile, activePreviewFile }) {
   );
 }
 
+function AudioContent({ payload, onPreviewFile, activePreviewFile }) {
+  const [playbackFailed, setPlaybackFailed] = useState(false);
+  const fallbackActionRef = useRef(null);
+  const shouldFocusFallbackRef = useRef(false);
+  const src = resolveMediaURL(payload?.url);
+  const downloadURL = downloadableMediaURL(src);
+  const sizeStr = payload?.size ? formatFileSize(payload.size) : '';
+
+  useEffect(() => {
+    setPlaybackFailed(false);
+  }, [src]);
+
+  useEffect(() => {
+    if (!playbackFailed || !shouldFocusFallbackRef.current) return;
+    fallbackActionRef.current?.focus({ preventScroll: true });
+    shouldFocusFallbackRef.current = false;
+  }, [playbackFailed]);
+
+  const handlePlaybackError = () => {
+    shouldFocusFallbackRef.current = document.activeElement instanceof HTMLElement
+      && document.activeElement.matches('audio, audio *');
+    setPlaybackFailed(true);
+  };
+
+  if (!payload || !src || playbackFailed) {
+    return (
+      <div className="oc-rich-audio-fallback">
+        {playbackFailed && (
+          <span className="oc-visually-hidden" role="status">
+            音频无法播放，已显示下载选项。
+          </span>
+        )}
+        <FileContent
+          actionRef={fallbackActionRef}
+          activePreviewFile={activePreviewFile}
+          inlineVideo={false}
+          onPreviewFile={onPreviewFile}
+          payload={payload}
+        />
+      </div>
+    );
+  }
+
+  return (
+    <div className="oc-rich-audio">
+      <div className="oc-rich-audio-header">
+        <span className="oc-rich-audio-icon" aria-hidden="true"><Volume2 size={17} /></span>
+        <span className="oc-rich-audio-name" title={payload.name || '语音消息'}>{payload.name || '语音消息'}</span>
+        {sizeStr && <span className="oc-rich-audio-size">{sizeStr}</span>}
+      </div>
+      <audio
+        aria-label={`播放音频 ${payload.name || ''}`.trim()}
+        className="oc-rich-audio-player"
+        controls
+        controlsList="nodownload"
+        onError={handlePlaybackError}
+        preload="metadata"
+        src={src}
+      >
+        您的浏览器暂不支持音频播放。
+      </audio>
+      <a
+        className="oc-rich-audio-download"
+        download={payload.name || true}
+        href={downloadURL || undefined}
+        rel="noopener noreferrer"
+        target="_blank"
+        title="下载音频"
+      >
+        <Download size={15} />
+        <span>下载</span>
+      </a>
+    </div>
+  );
+}
+
 function FileContent({ payload, onPreviewFile, activePreviewFile, inlineVideo = true, actionRef = null }) {
   if (inlineVideo && payload && isInlineVideoFile(payload)) {
     return <VideoContent payload={payload} onPreviewFile={onPreviewFile} activePreviewFile={activePreviewFile} />;
+  }
+  if (inlineVideo && payload && isInlineAudioFile(payload)) {
+    return <AudioContent payload={payload} onPreviewFile={onPreviewFile} activePreviewFile={activePreviewFile} />;
   }
   if (!payload) return null;
   const descriptor = previewFileDescriptor(payload);

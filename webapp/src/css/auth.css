@@ -1,0 +1,312 @@
+/*
+ * Critical styles for the unauthenticated entry screen.
+ *
+ * The full workspace visual system is loaded after authentication from
+ * views/workspace-styles.js. These rules deliberately mirror its login
+ * surface so that splitting the CSS does not change the first interaction.
+ */
+
+:root {
+  color-scheme: light;
+  --cc-font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+  --cc-bg: #fcfcfc;
+  --cc-panel: #ffffff;
+  --cc-code: #f5f5f6;
+  --cc-border: #ececef;
+  --cc-border-strong: #dedee2;
+  --cc-text: #1f1f1f;
+  --cc-text-secondary: #454549;
+  --cc-muted: #747479;
+  /*
+   * The anonymous screen uses the accent both as light-surface text and as
+   * the fill behind the primary action. Keep that single semantic color dark
+   * enough for 4.5:1 contrast in both contexts.
+   */
+  --cc-placeholder: color-mix(in srgb, var(--cc-text) 64%, var(--cc-code));
+  --cc-accent: oklch(52.9% 0.11 165);
+  --cc-accent-hover: oklch(46% 0.1 163);
+  --cc-accent-foreground: oklch(99% 0.003 165);
+  --cc-accent-soft: rgba(41, 188, 149, 0.16);
+  --cc-danger: #e05757;
+  --cc-radius-md: 8px;
+  --cc-radius-lg: 12px;
+}
+
+html[data-theme="dark"] {
+  color-scheme: dark;
+  --cc-bg: #1a1a1a;
+  --cc-panel: #232325;
+  --cc-code: #16161a;
+  --cc-border: #2d2d2f;
+  --cc-border-strong: #3a3a3d;
+  --cc-text: #ececec;
+  --cc-text-secondary: #b8b8bc;
+  --cc-muted: #9a9aa0;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  min-height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--cc-bg);
+  color: var(--cc-text);
+  font-family: var(--cc-font-sans);
+  font-size: 14px;
+  font-kerning: normal;
+  font-optical-sizing: auto;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+button,
+input {
+  font: inherit;
+}
+
+.oc-auth {
+  position: relative;
+  isolation: isolate;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 100dvh;
+  padding: 24px;
+  overflow: auto;
+  background: var(--cc-bg);
+}
+
+.oc-auth-flow-background {
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  contain: strict;
+}
+
+@media (prefers-reduced-motion: reduce), (max-width: 699px) {
+  .oc-auth-flow-background {
+    opacity: 0.72;
+  }
+}
+
+.oc-auth-card {
+  position: relative;
+  z-index: 1;
+  width: min(420px, 100%);
+  padding: 30px;
+  border: 1px solid var(--cc-border);
+  border-radius: var(--cc-radius-lg);
+  background: var(--cc-panel);
+  box-shadow: 0 16px 42px rgba(0, 0, 0, 0.18);
+  text-align: left;
+}
+
+.oc-auth-logo {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-bottom: 30px;
+  color: var(--cc-accent);
+  font-size: 28px;
+  font-weight: 700;
+}
+
+.oc-auth-input {
+  display: block;
+  width: 100%;
+  height: 46px;
+  margin-bottom: 12px;
+  padding: 0 14px;
+  outline: none;
+  border: 1px solid var(--cc-border);
+  border-radius: var(--cc-radius-md);
+  background: var(--cc-code);
+  color: var(--cc-text);
+  font-size: 14px;
+}
+
+.oc-auth-input::placeholder {
+  color: var(--cc-placeholder);
+}
+
+.oc-auth-input:focus {
+  border-color: var(--cc-border-strong);
+  box-shadow: 0 0 0 3px var(--cc-accent-soft);
+}
+
+.oc-auth-password-field {
+  position: relative;
+}
+
+.oc-auth-password-input {
+  padding-right: 48px;
+}
+
+.oc-auth-password-toggle {
+  position: absolute;
+  right: -4px;
+  top: 40%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 48px;
+  height: 48px;
+  margin: 0;
+  padding: 0;
+  transform: translateY(-50%);
+  border: 0;
+  background: transparent;
+  color: #888;
+  cursor: pointer;
+  user-select: none;
+}
+
+.oc-auth-btn {
+  display: block;
+  width: 100%;
+  height: 46px;
+  margin-top: 8px;
+  border: 1px solid transparent;
+  border-radius: var(--cc-radius-md);
+  background: var(--cc-accent);
+  color: var(--cc-accent-foreground);
+  cursor: pointer;
+  font-size: 14px;
+  font-weight: 600;
+  transition: background-color 160ms ease-out;
+}
+
+.oc-auth-btn:hover:not(:disabled) {
+  background: var(--cc-accent-hover);
+}
+
+.oc-auth-btn:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.oc-auth-code-row,
+.oc-password-reset-code-row {
+  display: flex;
+  align-items: stretch;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.oc-auth-code-row .oc-auth-input,
+.oc-password-reset-code-row .oc-auth-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  margin: 0;
+}
+
+.oc-auth-code-row .oc-auth-btn,
+.oc-password-reset-code-row .oc-auth-btn {
+  flex: 0 0 120px;
+  width: 120px;
+  height: 46px;
+  margin: 0;
+  font-size: 13px;
+}
+
+.oc-auth-link {
+  margin-top: 16px;
+  color: var(--cc-muted);
+  font-size: 13px;
+  text-align: center;
+}
+
+.oc-auth-link a {
+  color: var(--cc-text-secondary);
+  text-decoration: none;
+}
+
+.oc-auth-link a:hover {
+  color: var(--cc-text);
+}
+
+.oc-auth-link-secondary {
+  margin-left: 12px;
+}
+
+.oc-settings-secondary {
+  color: var(--cc-muted);
+  font-size: 12px;
+}
+
+.oc-form-error {
+  margin: -4px 0 12px;
+  color: var(--cc-danger);
+  font-size: 12px;
+}
+
+.oc-auth-error {
+  margin-bottom: 12px;
+  padding: 10px 12px;
+  border: 1px solid color-mix(in srgb, var(--cc-danger) 35%, var(--cc-border));
+  border-radius: var(--cc-radius-md);
+  background: color-mix(in srgb, var(--cc-danger) 8%, var(--cc-panel));
+  color: var(--cc-text-secondary);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.cc-inline-feedback {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid color-mix(in srgb, var(--cc-danger) 35%, var(--cc-border));
+  border-radius: var(--cc-radius-md);
+  background: color-mix(in srgb, var(--cc-danger) 8%, var(--cc-panel));
+  color: var(--cc-text-secondary);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.cc-inline-feedback-error > svg {
+  flex: 0 0 auto;
+  color: var(--cc-danger);
+}
+
+.oc-auth-feedback {
+  margin-bottom: 12px;
+}
+
+.cc-workspace-loading {
+  display: grid;
+  min-height: 100dvh;
+  place-items: center;
+  padding: 24px;
+  background: var(--cc-bg);
+  color: var(--cc-muted);
+}
+
+:focus-visible {
+  outline: 2px solid var(--cc-accent);
+  outline-offset: 2px;
+}
+
+@media (max-width: 760px) {
+  .oc-auth {
+    align-items: flex-start;
+    padding: 16px;
+  }
+
+  .oc-auth-card {
+    margin-top: max(16px, 8vh);
+    padding: 24px 20px;
+  }
+}

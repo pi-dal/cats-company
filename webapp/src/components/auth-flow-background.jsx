@@ -2,8 +2,8 @@ import React, { useEffect, useRef } from 'react';
 
 export const AUTH_FLOW_CYCLE = Object.freeze({ min: 9000, max: 15000 });
 export const AUTH_FLOW_POINTER_RADIUS = 120;
-export const AUTH_FLOW_MESH = Object.freeze({ compactNodes: 64, desktopNodes: 96, neighbours: 3 });
-export const AUTH_FLOW_PARTICLE_COUNT = Object.freeze({ compact: 280, desktop: 520 });
+export const AUTH_FLOW_MESH = Object.freeze({ compactNodes: 36, desktopNodes: 72, neighbours: 3 });
+export const AUTH_FLOW_PARTICLE_COUNT = Object.freeze({ compact: 96, desktop: 320 });
 
 const TAU = Math.PI * 2;
 
@@ -201,6 +201,11 @@ export function authFlowPalette(theme) {
   return { r: 14, g: 137, b: 104 };
 }
 
+export function authFlowFrameInterval({ compact = false, saveData = false } = {}) {
+  if (saveData) return 1000 / 15;
+  return compact ? 1000 / 24 : 1000 / 30;
+}
+
 export default function AuthFlowBackground() {
   const canvasRef = useRef(null);
 
@@ -214,8 +219,11 @@ export default function AuthFlowBackground() {
     }
     if (!canvas || !context) return undefined;
 
+    const compact = window.matchMedia?.('(max-width: 699px)').matches ?? false;
+    const saveData = Boolean(navigator.connection?.saveData);
     const pointer = { active: false, x: 0, y: 0 };
     const reduceMotion = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ?? false;
+    const frameInterval = authFlowFrameInterval({ compact, saveData });
     let animationFrame = 0;
     let lastFrame = 0;
     let scene = createAuthFlowScene(1, 1);
@@ -292,7 +300,7 @@ export default function AuthFlowBackground() {
         const depth = clamp((position.depth + 1.4) / 2.8, 0.22, 1);
         const opacity = particle.opacity * position.edgeFade * (0.62 + depth * 0.7);
 
-        if (particle.trail) {
+        if (particle.trail && !compact) {
           const tail = particlePosition(particle, timestamp, scene, pointer, -0.007);
           context.beginPath();
           context.moveTo(tail.x, tail.y);
@@ -343,7 +351,7 @@ export default function AuthFlowBackground() {
       pointer.active = false;
     };
     const animate = (timestamp) => {
-      if (timestamp - lastFrame >= 33) {
+      if (timestamp - lastFrame >= frameInterval) {
         lastFrame = timestamp;
         draw(timestamp);
       }

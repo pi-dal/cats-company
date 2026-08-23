@@ -710,6 +710,9 @@
 }
 
 .v3-shell-actions {
+  display: flex;
+  align-items: center;
+  flex: 0 0 auto;
   min-width: 0;
   justify-self: end;
   margin-left: 0;
@@ -766,6 +769,7 @@
   }
 
   .v3-shell-actions {
+    min-width: max-content;
     gap: 2px;
   }
 
@@ -800,6 +804,8 @@
 
   .v3-shell-actions {
     grid-area: actions;
+    min-width: max-content;
+    overflow: visible;
   }
 
   .v3-model-menu {

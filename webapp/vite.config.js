@@ -1,14 +1,44 @@
 import { defineConfig } from 'vite';
+import { readFileSync } from 'node:fs';
 import react from '@vitejs/plugin-react';
 import { VitePWA } from 'vite-plugin-pwa';
 
-const backendTarget = 'http://localhost:6061';
+const backendTarget = process.env.VITE_BACKEND_TARGET || 'http://localhost:6061';
 const localXiaobaTarget = 'http://127.0.0.1:3800';
+
+const inlineAuthEntryStyles = {
+  name: 'inline-auth-entry-styles',
+  transformIndexHtml(html) {
+    const authEntryStyles = readFileSync(new URL('./src/css/auth.css', import.meta.url), 'utf8');
+    return html.replace('/* __CATSCO_AUTH_STYLES__ */', authEntryStyles);
+  },
+};
+
+const preloadWorkspaceStyles = {
+  name: 'preload-workspace-styles',
+  transformIndexHtml: {
+    order: 'post',
+    handler(html, context) {
+      const assets = context.bundle ? Object.values(context.bundle) : [];
+      const workspaceStylesAsset = assets.find((item) => (
+        item.type === 'asset'
+        && typeof item.fileName === 'string'
+        && /^assets\/workspace-styles-[^/]+\.css$/.test(item.fileName)
+      ));
+      const workspaceStylesURL = workspaceStylesAsset ? `/${workspaceStylesAsset.fileName}` : '';
+      return html.replace('__CATSCO_WORKSPACE_STYLES_PRELOAD__', workspaceStylesURL);
+    },
+  },
+};
 
 const proxy = {
   '/local-xiaoba': {
     target: localXiaobaTarget,
     rewrite: (path) => path.replace(/^\/local-xiaoba/, ''),
+  },
+  '/api/stt/realtime': {
+    target: backendTarget,
+    ws: true,
   },
   '/api': backendTarget,
   '/local': backendTarget,
@@ -21,6 +51,8 @@ const proxy = {
 
 export default defineConfig({
   plugins: [
+    inlineAuthEntryStyles,
+    preloadWorkspaceStyles,
     react(),
     VitePWA({
       strategies: 'injectManifest',
@@ -65,7 +97,14 @@ export default defineConfig({
         ],
       },
       injectManifest: {
-        globPatterns: ['assets/**/*.{js,css}', 'offline.html', 'pwa-*.png'],
+        // Keep the app shell available offline without downloading lazy
+        // workspace, PDF, and media chunks during service-worker install.
+        globPatterns: [
+          'index.html',
+          'assets/index-*.{js,css}',
+          'assets/workbox-window.*.js',
+          'offline.html',
+        ],
         maximumFileSizeToCacheInBytes: 4 * 1024 * 1024,
       },
       devOptions: {

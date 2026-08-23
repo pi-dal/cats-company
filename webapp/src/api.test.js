@@ -571,6 +571,49 @@ describe('WebSocket connection recovery', () => {
   });
 });
 
+describe('read request deduplication', () => {
+  let apiModule;
+
+  beforeEach(async () => {
+    vi.resetModules();
+    localStorage.clear();
+    sessionStorage.clear();
+    apiModule = await import('./api');
+    apiModule.setToken('dedupe-token');
+  });
+
+  afterEach(() => {
+    apiModule.disconnectWS();
+    vi.restoreAllMocks();
+  });
+
+  test('shares overlapping authenticated GET requests and clears the entry after settlement', async () => {
+    let resolveFetch;
+    const response = {
+      ok: true,
+      status: 200,
+      json: vi.fn().mockResolvedValue({ agents: [{ uid: 77 }] }),
+    };
+    global.fetch = vi.fn(() => new Promise((resolve) => {
+      resolveFetch = resolve;
+    }));
+
+    const first = apiModule.api.getAgents();
+    const second = apiModule.api.getAgents();
+    expect(global.fetch).toHaveBeenCalledTimes(1);
+
+    resolveFetch(response);
+    await expect(Promise.all([first, second])).resolves.toEqual([
+      { agents: [{ uid: 77 }] },
+      { agents: [{ uid: 77 }] },
+    ]);
+
+    global.fetch.mockResolvedValueOnce(response);
+    await apiModule.api.getAgents();
+    expect(global.fetch).toHaveBeenCalledTimes(2);
+  });
+});
+
 describe('message history request controls', () => {
   let api;
 
@@ -631,6 +674,44 @@ describe('message history request controls', () => {
 
     controller.abort();
     await rejection;
+  });
+});
+
+describe('public conversation share requests', () => {
+  let apiModule;
+
+  beforeEach(async () => {
+    vi.resetModules();
+    localStorage.clear();
+    global.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: vi.fn().mockResolvedValue({ title: '会话片段', items: [] }),
+    });
+    apiModule = await import('./api');
+    apiModule.setToken('owner-session-token');
+  });
+
+  afterEach(() => {
+    apiModule.disconnectWS();
+    vi.restoreAllMocks();
+  });
+
+  test('loads a capability link without forwarding the owner session', async () => {
+    await expect(apiModule.api.getConversationShare('visitor-capability')).resolves.toEqual({
+      title: '会话片段',
+      items: [],
+    });
+
+    expect(global.fetch).toHaveBeenCalledWith(
+      '/api/shared-conversations/visitor-capability',
+      expect.objectContaining({
+        method: 'GET',
+        credentials: 'omit',
+        headers: { Accept: 'application/json' },
+      }),
+    );
+    expect(global.fetch.mock.calls[0][1].headers).not.toHaveProperty('Authorization');
   });
 });
 

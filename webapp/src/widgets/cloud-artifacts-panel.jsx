@@ -72,13 +72,15 @@ function fileMeta(file) {
 export default function CloudArtifactsPanel({
   agentUid,
   topicId,
+  initialTab = 'files',
   tab: controlledTab,
   onTabChange,
   onClose,
   onPreviewArtifact,
   onPreviewFile,
 }) {
-  const [localTab, setLocalTab] = useState('files');
+  const normalizedInitialTab = ['active', 'deleted', 'files'].includes(initialTab) ? initialTab : 'files';
+  const [localTab, setLocalTab] = useState(normalizedInitialTab);
   const tab = controlledTab ?? localTab;
   const [artifacts, setArtifacts] = useState([]);
   const [files, setFiles] = useState([]);
@@ -104,6 +106,14 @@ export default function CloudArtifactsPanel({
     setError('');
     try {
       if (tab === 'files') {
+        if (!topicId) {
+          if (!isCurrentRequest()) return;
+          setFiles([]);
+          setFileCursor(0);
+          setFileHasMore(false);
+          setError('进入会话后才能查看历史文件');
+          return;
+        }
         const result = await api.getAgentFiles(agentUid, { topicId, beforeId, limit: 40 });
         if (!isCurrentRequest()) return;
         const nextFiles = Array.isArray(result?.files) ? result.files : [];
@@ -217,6 +227,8 @@ export default function CloudArtifactsPanel({
               aria-selected={tab === 'files'}
               className={tab === 'files' ? 'active' : ''}
               onClick={() => selectTab('files')}
+              disabled={!topicId}
+              title={topicId ? '当前会话文件' : '进入会话后查看文件'}
             >
               文件
             </button>
@@ -447,8 +459,6 @@ function HistoricalFileItem({ file, onPreviewFile }) {
           <a
             href={downloadURL}
             download={file.name || true}
-            target="_blank"
-            rel="noopener noreferrer"
             aria-label={'下载 ' + file.name}
             title="下载"
           >

@@ -5,10 +5,122 @@
   <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <meta name="theme-color" content="#f8f8f8" />
+  <!-- Vite injects the source-auth stylesheet here during both dev and production builds. -->
+  <style>/* __CATSCO_AUTH_STYLES__ */</style>
   <title>CatsCo</title>
 </head>
 <body>
-  <div id="root"></div>
-  <script type="module" src="/src/index.jsx"></script>
+  <div id="root" data-initial-auth-shell>
+    <main class="oc-auth">
+      <form class="oc-auth-card">
+        <div class="oc-auth-logo">CatsCo</div>
+        <input
+          class="oc-auth-input"
+          type="text"
+          placeholder="用户名"
+          aria-label="用户名"
+          autocomplete="username"
+          value=""
+        />
+        <div class="oc-auth-password-field">
+          <input
+            class="oc-auth-input oc-auth-password-input"
+            type="password"
+            placeholder="密码"
+            aria-label="密码"
+            autocomplete="current-password"
+            value=""
+          />
+          <button
+            class="oc-auth-password-toggle"
+            type="button"
+            aria-label="显示密码"
+            aria-pressed="false"
+            title="显示密码"
+          >
+            <svg
+              xmlns="http://www.w3.org/2000/svg"
+              width="16"
+              height="16"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+              class="lucide lucide-eye"
+              aria-hidden="true"
+            >
+              <path d="M2.062 12.348a1 1 0 0 1 0-.696 10.75 10.75 0 0 1 19.876 0 1 1 0 0 1 0 .696 10.75 10.75 0 0 1-19.876 0"></path>
+              <circle cx="12" cy="12" r="3"></circle>
+            </svg>
+          </button>
+        </div>
+        <button class="oc-auth-btn" type="submit">登录</button>
+        <div class="oc-auth-link">
+          <span>还没有账号？<a href="#">立即注册</a></span>
+          <span class="oc-auth-link-secondary"><a href="#">忘记密码？</a></span>
+        </div>
+      </form>
+    </main>
+  </div>
+  <script>
+    (() => {
+      const root = document.getElementById('root');
+      if (!root?.hasAttribute('data-initial-auth-shell')) return;
+
+      const whitespaceNodes = [];
+      const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+      while (walker.nextNode()) {
+        if (!walker.currentNode.nodeValue.trim()) whitespaceNodes.push(walker.currentNode);
+      }
+      whitespaceNodes.forEach((node) => node.remove());
+
+      let hasToken = false;
+      try {
+        hasToken = Boolean(window.localStorage?.getItem('oc_token'));
+      } catch {
+        // Storage can be unavailable in private browsing or embedded webviews.
+      }
+
+      const path = window.location.pathname;
+      const query = new URLSearchParams(window.location.search);
+      const specialRoute = path.startsWith('/share/')
+        || path.startsWith('/mobile-upload/')
+        || query.get('workflow_demo') === '1';
+
+      const addHighPriorityStylesheet = (href) => {
+        if (!href.startsWith('/')) return;
+        const stylesheetLink = document.createElement('link');
+        stylesheetLink.rel = 'stylesheet';
+        stylesheetLink.href = href;
+        stylesheetLink.setAttribute('fetchpriority', 'high');
+        document.head.appendChild(stylesheetLink);
+      };
+
+      const workspaceStylesPreloadURL = '__CATSCO_WORKSPACE_STYLES_PRELOAD__';
+      const workspaceRoute = hasToken
+        || path.startsWith('/share/')
+        || query.get('workflow_demo') === '1';
+      if (workspaceRoute) {
+        addHighPriorityStylesheet(workspaceStylesPreloadURL);
+      }
+
+      if (hasToken || specialRoute) {
+        const brandPreload = document.createElement('link');
+        brandPreload.rel = 'preload';
+        brandPreload.as = 'image';
+        brandPreload.href = '/catsco-brand-mark.webp';
+        brandPreload.setAttribute('fetchpriority', 'high');
+        document.head.appendChild(brandPreload);
+      }
+
+      if (hasToken || specialRoute) {
+        root.replaceChildren();
+        root.removeAttribute('data-initial-auth-shell');
+      }
+    })();
+  </script>
+  <script type="module" async src="/src/index.jsx"></script>
 </body>
 </html>

@@ -134,6 +134,16 @@ describe('CloudArtifactsPanel', () => {
     expect(navigator.clipboard.writeText).toHaveBeenCalledWith('https://example.test/lesson-game/latest/');
   });
 
+  test('opens global artifacts without requesting conversation files when no topic exists', async () => {
+    await renderPanel({ topicId: '' });
+
+    expect(api.getCloudArtifacts).toHaveBeenCalledWith(440, 'active');
+    expect(api.getAgentFiles).not.toHaveBeenCalled();
+    const filesTab = [...container.querySelectorAll('button[role="tab"]')]
+      .find((button) => button.textContent === '文件');
+    expect(filesTab?.disabled).toBe(true);
+  });
+
   test('cancels deletion without making a request', async () => {
     await renderPanel();
 
@@ -336,11 +346,17 @@ describe('CloudArtifactsPanel', () => {
       container.querySelector('a[aria-label="下载 复习清单.docx"]')?.getAttribute('href'),
     ).toBe('/uploads/files/review-list.docx?download=1');
     expect(
+      container.querySelector('a[aria-label="下载 复习清单.docx"]')?.getAttribute('target'),
+    ).toBeNull();
+    expect(
       container.querySelector('a[aria-label="在新窗口打开 课程素材.zip"]')?.getAttribute('href'),
     ).toBe('/uploads/files/course-assets.zip');
     expect(
       container.querySelector('a[aria-label="下载 课程素材.zip"]')?.getAttribute('href'),
     ).toBe('/uploads/files/course-assets.zip?download=1');
+    expect(
+      container.querySelector('a[aria-label="下载 课程素材.zip"]')?.getAttribute('target'),
+    ).toBeNull();
     expect(container.querySelector('.cloud-artifacts-panel')).not.toBeNull();
     expect(onPreviewFile).not.toHaveBeenCalled();
   });

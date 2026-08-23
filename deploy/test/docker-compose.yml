@@ -43,6 +43,15 @@ services:
       OC_REDIS_KEY_PREFIX: "${OC_REDIS_KEY_PREFIX:-}"
       CATSCO_NODE_ID: "${CATSCO_NODE_ID:-}"
       OC_JWT_SECRET: "${OC_JWT_SECRET}"
+      CATSCO_STT_ENABLED: "${CATSCO_STT_ENABLED:-0}"
+      CATSCO_STT_PROVIDER: "${CATSCO_STT_PROVIDER:-volcengine-doubao-streaming-v2}"
+      CATSCO_STT_MAX_SESSION_SECONDS: "${CATSCO_STT_MAX_SESSION_SECONDS:-150}"
+      CATSCO_STT_MAX_CONCURRENT: "${CATSCO_STT_MAX_CONCURRENT:-40}"
+      CATSCO_STT_MAX_HOURLY_SECONDS: "${CATSCO_STT_MAX_HOURLY_SECONDS:-1440}"
+      CATSCO_STT_MAX_DAILY_SECONDS: "${CATSCO_STT_MAX_DAILY_SECONDS:-3600}"
+      VOLCENGINE_STT_WS_URL: "${VOLCENGINE_STT_WS_URL:-wss://openspeech.bytedance.com/api/v3/sauc/bigmodel_async}"
+      VOLCENGINE_STT_API_KEY: "${VOLCENGINE_STT_API_KEY:-}"
+      VOLCENGINE_STT_RESOURCE_ID: "${VOLCENGINE_STT_RESOURCE_ID:-volc.seedasr.sauc.duration}"
       VAPID_PUBLIC_KEY: "${VAPID_PUBLIC_KEY:-}"
       VAPID_PRIVATE_KEY: "${VAPID_PRIVATE_KEY:-}"
       VAPID_SUBJECT: "${VAPID_SUBJECT:-}"
@@ -143,6 +152,7 @@ services:
       - "${TEST_GRPC_BIND_HOST:-127.0.0.1}:${TEST_GRPC_HOST_PORT:-16062}:6062"
     volumes:
       - "${TEST_STACK_ROOT}/data/uploads:/app/uploads"
+      - "${TEST_STACK_ROOT}/data/conversation-share-assets:/app/conversation-share-assets"
       - "${TEST_STACK_ROOT}/compose/tinode.test.conf:/app/tinode.conf:ro"
       - "${TEST_STACK_ROOT}/secrets:/run/catsco-secrets:ro"
     extra_hosts:

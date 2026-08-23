@@ -106,7 +106,7 @@ html[data-theme="liquid"][data-liquid-variant="green"] .catsco-download-release-
 html[data-theme="liquid"][data-liquid-variant="green"] body {
   background:
     linear-gradient(rgba(1, 8, 7, 0.86), rgba(1, 8, 7, 0.86)),
-    #031a16 url('/liquid-dark-background.png') center / cover fixed no-repeat;
+    #031a16 url('/liquid-dark-background.webp') center / cover fixed no-repeat;
 }
 
 html[data-theme="liquid"][data-liquid-variant="green"] body::before,
@@ -211,7 +211,7 @@ html[data-theme="liquid"][data-liquid-variant="green"] .v3-profile-footer {
 html[data-theme="liquid"][data-liquid-variant="green"] .v3-main {
   background:
     linear-gradient(rgba(1, 8, 7, 0.86), rgba(1, 8, 7, 0.86)),
-    #031a16 url('/liquid-dark-background.png') center / cover no-repeat;
+    #031a16 url('/liquid-dark-background.webp') center / cover no-repeat;
 }
 
 html[data-theme="liquid"][data-liquid-variant="green"] .v3-message-workspace {

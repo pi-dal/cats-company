@@ -1,4 +1,4 @@
-import { readFileSync } from 'node:fs';
+import { readFileSync, statSync } from 'node:fs';
 import { resolve } from 'node:path';
 
 const css = readFileSync(resolve(process.cwd(), 'src/css/catsco-liquid-green.css'), 'utf8')
@@ -65,7 +65,8 @@ describe('restored green liquid theme', () => {
       /html\[data-theme="liquid"\]\[data-liquid-variant="green"\] :is\(\.cc-sidebar-primary:hover, \.cc-sidebar-search:hover, \.cc-sidebar-search:focus-within\)\s*\{[^}]*0 5px 13px/,
     );
     expect(css).toContain(':is(input, textarea, select, .v3-custom-model-select-trigger)');
-    expect(css).toContain("url('/liquid-dark-background.png')");
+    expect(css).toContain("url('/liquid-dark-background.webp')");
+    expect(css).not.toContain('liquid-dark-background.png');
     expect(css).toContain('background: linear-gradient(180deg, #151b19 0%, #111714 58%, #0f1513 100%);');
     expect(css).toContain('background: rgba(21, 155, 120, 0.28);');
     expect(css).toMatch(
@@ -75,5 +76,10 @@ describe('restored green liquid theme', () => {
       /\.v3-wpi-plan-step\.completed\s*\{[^}]*color: rgba\(211, 232, 225, 0\.76\);/,
     );
     expect(css).not.toMatch(/\.v3-wpi-plan\s*\{[^}]*background: #000;/);
+  });
+
+  it('keeps the liquid background in a small web-native format', () => {
+    const asset = statSync(resolve(process.cwd(), 'public/liquid-dark-background.webp'));
+    expect(asset.size).toBeLessThan(100 * 1024);
   });
 });

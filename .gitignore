@@ -40,6 +40,8 @@ deploy/nginx/ssl/fullchain.pem
 mysql_data/
 uploads/
 server/cmd/uploads/
+conversation-share-assets/
+server/cmd/conversation-share-assets/
 *.log
 
 # Local AI tooling

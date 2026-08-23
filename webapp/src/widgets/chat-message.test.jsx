@@ -58,7 +58,7 @@ vi.mock('read-excel-file/browser', () => ({
   default: vi.fn(),
 }));
 
-import ChatMessage, { createCloudArtifactPreviewFile, FilePreviewPanel } from './chat-message';
+import ChatMessage, { createCloudArtifactPreviewFile, FilePreviewPanel, previewFileDescriptor } from './chat-message';
 import { markdownPreviewDocument } from './markdown-utils';
 import readExcelFile from 'read-excel-file/browser';
 
@@ -132,6 +132,18 @@ describe('ChatMessage rich file rendering', () => {
     });
     container.remove();
     vi.clearAllMocks();
+  });
+
+  it('recognizes a capability-scoped shared file as safe to preview', () => {
+    const descriptor = previewFileDescriptor({
+      name: 'report.pdf',
+      url: '/api/shared-conversations/abcdefghijklmnopqrstuvwxyz_0123456789-ABCDE/assets/0123456789abcdef0123456789abcdef',
+      mime_type: 'application/pdf',
+      size: 128,
+    });
+
+    expect(descriptor?.canPreview).toBe(true);
+    expect(descriptor?.url).toBe('/api/shared-conversations/abcdefghijklmnopqrstuvwxyz_0123456789-ABCDE/assets/0123456789abcdef0123456789abcdef');
   });
 
   it('previews uploaded HTML as a sandboxed workflow report artifact', async () => {
@@ -984,6 +996,7 @@ describe('ChatMessage rich file rendering', () => {
     const preview = document.body.querySelector('.oc-rich-image-preview');
     const previewImage = preview?.querySelector('.oc-rich-image-preview-media');
     const closeButton = preview?.querySelector('button.oc-rich-image-preview-close');
+    const download = preview?.querySelector('a.oc-rich-media-preview-download');
     expect(preview).not.toBeNull();
     expect(container.contains(preview)).toBe(false);
     expect(preview.getAttribute('role')).toBe('dialog');
@@ -992,6 +1005,11 @@ describe('ChatMessage rich file rendering', () => {
     expect(previewImage?.getAttribute('src')).toBe('/uploads/images/poster.png');
     expect(previewImage?.getAttribute('alt')).toBe('poster.png preview');
     expect(closeButton?.getAttribute('aria-label')).toBe('关闭图片预览');
+    expect(download?.getAttribute('aria-label')).toBe('下载图片 poster.png');
+    expect(download?.getAttribute('href')).toBe('/uploads/images/poster.png?download=1');
+    expect(download?.getAttribute('download')).toBe('poster.png');
+    expect(download?.getAttribute('target')).toBe('_blank');
+    expect(download?.getAttribute('rel')).toBe('noopener noreferrer');
     expect(document.activeElement).toBe(closeButton);
 
     await act(async () => {
@@ -1844,6 +1862,8 @@ describe('ChatMessage rich file rendering', () => {
     const downloadLink = panel.querySelector('.v3-file-preview-actions a');
     expect(downloadLink.getAttribute('href')).toBe('/uploads/files/report.pdf?download=1');
     expect(downloadLink.getAttribute('download')).toBe('report.pdf');
+    expect(downloadLink.getAttribute('target')).toBe('_blank');
+    expect(downloadLink.getAttribute('rel')).toBe('noopener noreferrer');
   });
 
   it('closes the file preview from its backdrop and the Escape key', async () => {
@@ -2250,6 +2270,8 @@ describe('ChatMessage rich file rendering', () => {
     expect(actions[1].getAttribute('href')).toBe('/uploads/files/20260715_f547bf132d510e621877d89214098db5.pdf?download=1');
     expect(actions[1].hasAttribute('download')).toBe(true);
     expect(actions[1].getAttribute('download')).toBe('【电商带货主播_广州 4-6K】何荧 25年应届生.pdf');
+    expect(actions[1].getAttribute('target')).toBe('_blank');
+    expect(actions[1].getAttribute('rel')).toBe('noopener noreferrer');
   });
 
   it('renders MP4 attachments as image-sized thumbnails that open a video preview', async () => {
@@ -2290,6 +2312,16 @@ describe('ChatMessage rich file rendering', () => {
     expect(container.querySelector('.v3-attachment-card')).toBeNull();
     expect(container.querySelector('.v3-file-preview-panel')).toBeNull();
 
+    Object.defineProperties(thumbnail, {
+      videoHeight: { configurable: true, value: 540 },
+      videoWidth: { configurable: true, value: 1920 },
+    });
+    await act(async () => {
+      thumbnail.dispatchEvent(new Event('loadedmetadata', { bubbles: true }));
+      await Promise.resolve();
+    });
+    expect(container.querySelector('.oc-rich-video').classList.contains('is-ultrawide')).toBe(true);
+
     trigger.focus();
     await act(async () => {
       Simulate.click(trigger);
@@ -2298,11 +2330,15 @@ describe('ChatMessage rich file rendering', () => {
 
     const preview = container.querySelector('video.oc-rich-video-player');
     const closeButton = container.querySelector('button.oc-rich-video-preview-close');
+    const download = container.querySelector('a.oc-rich-media-preview-download');
     expect(preview).not.toBeNull();
     expect(preview.getAttribute('src')).toBe('/uploads/files/20260727_1234567890abcdef1234567890abcdef.mp4');
     expect(preview.controls).toBe(true);
     expect(preview.autoplay).toBe(true);
     expect(preview.getAttribute('aria-label')).toBe('product-demo.mp4');
+    expect(download.getAttribute('aria-label')).toBe('下载视频 product-demo.mp4');
+    expect(download.getAttribute('href')).toBe('/uploads/files/20260727_1234567890abcdef1234567890abcdef.mp4?download=1');
+    expect(download.getAttribute('download')).toBe('product-demo.mp4');
     expect(container.querySelector('.oc-rich-video-preview').getAttribute('role')).toBe('dialog');
     expect(document.activeElement).toBe(closeButton);
 
@@ -2510,7 +2546,7 @@ describe('ChatMessage rich file rendering', () => {
     expect(container.querySelector('.v3-attachment-card')).toBeNull();
   });
 
-  it('keeps audio/ogg attachments as file cards', async () => {
+  it('renders audio attachments with an inline player and an explicit download', async () => {
     await act(async () => {
       root.render(
         <PreviewHarness
@@ -2534,8 +2570,111 @@ describe('ChatMessage rich file rendering', () => {
       await Promise.resolve();
     });
 
+    const player = container.querySelector('audio.oc-rich-audio-player');
+    const download = container.querySelector('a.oc-rich-audio-download');
+
     expect(container.querySelector('video.oc-rich-video-player')).toBeNull();
-    expect(container.querySelector('.v3-attachment-name').textContent).toBe('recording.ogg');
+    expect(player).not.toBeNull();
+    expect(player.getAttribute('src')).toBe('/uploads/files/20260727_00112233445566778899aabbccddeeff.ogg');
+    expect(player.controls).toBe(true);
+    expect(player.preload).toBe('metadata');
+    expect(player.getAttribute('aria-label')).toBe('播放音频 recording.ogg');
+    expect(container.querySelector('.oc-rich-audio-name').textContent).toBe('recording.ogg');
+    expect(download.getAttribute('href')).toContain('download=1');
+    expect(download.getAttribute('download')).toBe('recording.ogg');
+    expect(download.getAttribute('target')).toBe('_blank');
+    expect(download.getAttribute('rel')).toBe('noopener noreferrer');
+  });
+
+  it('accepts explicit voice blocks for inline playback', async () => {
+    await act(async () => {
+      root.render(
+        <PreviewHarness
+          message={{
+            id: 111,
+            from_uid: 2,
+            content: '[语音] 微信语音.ogg',
+            content_blocks: [{
+              type: 'voice',
+              payload: {
+                name: '微信语音.ogg',
+                url: '/uploads/files/20260812_00112233445566778899aabbccddeeff.ogg',
+                size: 4096,
+                mime_type: 'audio/ogg',
+              },
+            }],
+            created_at: '2026-08-12T00:00:00Z',
+          }}
+        />,
+      );
+      await Promise.resolve();
+    });
+
+    expect(container.querySelector('audio.oc-rich-audio-player')).not.toBeNull();
+    expect(container.querySelector('.oc-rich-audio-name').textContent).toBe('微信语音.ogg');
+  });
+
+  it('uses the forced-download route for unnamed voice messages', async () => {
+    await act(async () => {
+      root.render(
+        <PreviewHarness
+          message={{
+            id: 113,
+            from_uid: 2,
+            content: '[语音]',
+            content_blocks: [{
+              type: 'voice',
+              payload: {
+                url: '/uploads/files/20260812_11223344556677889900aabbccddeeff.ogg',
+                size: 4096,
+                mime_type: 'audio/ogg',
+              },
+            }],
+            created_at: '2026-08-12T00:00:00Z',
+          }}
+        />,
+      );
+      await Promise.resolve();
+    });
+
+    const download = container.querySelector('a.oc-rich-audio-download');
+    expect(download.getAttribute('href')).toBe('/uploads/files/20260812_11223344556677889900aabbccddeeff.ogg?download=1');
+    expect(download.getAttribute('target')).toBe('_blank');
+  });
+
+  it('falls back to a downloadable file card when audio playback fails', async () => {
+    await act(async () => {
+      root.render(
+        <PreviewHarness
+          message={{
+            id: 112,
+            from_uid: 2,
+            content: '[文件] broken.ogg',
+            content_blocks: [{
+              type: 'file',
+              payload: {
+                name: 'broken.ogg',
+                url: '/uploads/files/20260812_ffeeddccbbaa99887766554433221100.ogg',
+                size: 4096,
+                mime_type: 'audio/ogg',
+              },
+            }],
+            created_at: '2026-08-12T00:00:00Z',
+          }}
+        />,
+      );
+      await Promise.resolve();
+    });
+
+    const player = container.querySelector('audio.oc-rich-audio-player');
+    await act(async () => {
+      Simulate.error(player);
+      await Promise.resolve();
+    });
+
+    expect(container.querySelector('audio.oc-rich-audio-player')).toBeNull();
+    expect(container.querySelector('[role="status"]').textContent).toContain('音频无法播放');
+    expect(container.querySelector('.v3-attachment-name').textContent).toBe('broken.ogg');
     expect(container.querySelector('a.v3-artifact-action').getAttribute('href')).toContain('download=1');
   });
 

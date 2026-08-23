@@ -316,11 +316,13 @@ func main() {
 	deviceHandler := server.NewDeviceHandler(db, hub)
 	deviceConnectorHandler := server.NewDeviceConnectorHandler(db, hub)
 	uploadHandler := server.NewUploadHandler("./uploads", "/uploads")
+	conversationShareHandler := server.NewConversationShareHandler(db, hub, "./uploads", "./conversation-share-assets")
 	tutorialTaskHandler := server.NewTutorialTaskHandler("./uploads", "/uploads")
 	readerHandler := server.NewReaderProxyHandlerFromEnv()
 	cloudArtifactHandler := server.NewCloudArtifactHandlerFromEnv()
 	cloudArtifactHandler.SetStore(db)
 	imageGenerationHandler := server.NewImageGenerationProxyHandlerFromEnv()
+	sttHandler := server.NewSTTHandlerFromEnv()
 	feedbackHandler := server.NewFeedbackHandler(db)
 	relayConfigHandler := server.NewRelayConfigHandler()
 	relayKeyHandler := server.NewRelayKeyHandlerFromEnv()
@@ -516,6 +518,11 @@ func main() {
 	mux.HandleFunc("/api/messages/send", authWithDB(msgHandler.HandleSendMessage))
 	mux.HandleFunc("/api/messages/search", authWithDB(msgHandler.HandleSearchMessages))
 	mux.HandleFunc("/api/messages", authWithDB(msgHandler.HandleGetMessages))
+	mux.HandleFunc("/api/conversation-shares", jwtAuthWithDB(conversationShareHandler.HandleAuthenticated))
+	mux.HandleFunc("/api/conversation-shares/", jwtAuthWithDB(conversationShareHandler.HandleAuthenticated))
+	mux.HandleFunc("/api/shared-conversations/", conversationShareHandler.HandlePublic)
+	mux.HandleFunc("/api/stt/sessions", jwtAuthWithDB(sttHandler.HandleSession))
+	mux.HandleFunc("/api/stt/realtime", sttHandler.HandleRealtime)
 	mux.HandleFunc("/api/push/config", pushNotificationService.HandleStatus)
 	mux.HandleFunc("/api/push/subscriptions", chainHTTP(
 		pushNotificationService.HandleSubscription,
@@ -658,6 +665,11 @@ func main() {
 		if err := imageGenerationHandler.EditConfigError(); err != nil {
 			log.Printf("Reference-image proxy is unavailable until configured: %v", err)
 		}
+	}
+	if err := sttHandler.ConfigError(); err != nil {
+		log.Printf("Streaming STT is unavailable: %v", err)
+	} else {
+		log.Printf("Streaming STT is enabled with provider %s", server.STTProviderVolcengineDoubaoStreamingV2)
 	}
 
 	// Token usage tracking (API Key auth for bots)

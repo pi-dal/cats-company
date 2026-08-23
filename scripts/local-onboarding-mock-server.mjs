@@ -1,7 +1,8 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import http from 'node:http';
-import { URL } from 'node:url';
+import path from 'node:path';
+import { fileURLToPath, URL } from 'node:url';
 
 const port = Number(process.env.MOCK_CATS_PORT || 6061);
 const scenario = String(process.env.MOCK_CATS_SCENARIO || 'new').trim().toLowerCase();
@@ -14,6 +15,21 @@ const tutorialTasksFile = String(process.env.MOCK_CATS_TUTORIAL_TASKS_FILE || ''
 const tutorialTasksJSON = String(process.env.MOCK_CATS_TUTORIAL_TASKS_JSON || '').trim();
 const showcaseUsername = String(process.env.MOCK_CATS_SHOWCASE_USERNAME || 'ui-reviewer').trim();
 const showcasePassword = String(process.env.MOCK_CATS_SHOWCASE_PASSWORD || 'demo123456');
+const scriptDirectory = path.dirname(fileURLToPath(import.meta.url));
+const mockShareDemoAssets = new Map([
+  ['/demo-artifacts/grade-summary.csv', {
+    filePath: path.resolve(scriptDirectory, '../webapp/public/demo-artifacts/grade-summary.csv'),
+    mimeType: 'text/csv; charset=utf-8',
+  }],
+  ['/demo-artifacts/teaching-report.html', {
+    filePath: path.resolve(scriptDirectory, '../webapp/public/demo-artifacts/teaching-report.html'),
+    mimeType: 'text/html; charset=utf-8',
+  }],
+  ['/demo-artifacts/teaching-summary.md', {
+    filePath: path.resolve(scriptDirectory, '../webapp/public/demo-artifacts/teaching-summary.md'),
+    mimeType: 'text/markdown; charset=utf-8',
+  }],
+]);
 
 let nextUserId = 100;
 let nextBotId = 200;
@@ -28,6 +44,8 @@ const onlineBodies = new Map();
 const agentSockets = new Map();
 const webSocketsByUserId = new Map();
 const messagesByTopic = new Map();
+const conversationSharesByID = new Map();
+const conversationSharesByToken = new Map();
 const showcaseByUserId = new Map();
 const projectsByUserId = new Map();
 const projectTopicsByUserId = new Map();
@@ -280,6 +298,21 @@ function seedChatShowcase(user, bots) {
         from_uid: codeAgent.id,
         role: 'assistant',
         content: '检查结果：长指令会在最大宽度内自然换行，气泡只包裹正文；时间、复制和更多操作位于气泡下方，并与右边缘对齐。',
+        content_blocks: [
+          {
+            type: 'text',
+            text: '检查结果：长指令会在最大宽度内自然换行，气泡只包裹正文；时间、复制和更多操作位于气泡下方，并与右边缘对齐。',
+          },
+          {
+            type: 'file',
+            payload: {
+              name: '聊天界面验收清单.md',
+              url: '/demo-artifacts/teaching-summary.md',
+              size: 913,
+              mime_type: 'text/markdown',
+            },
+          },
+        ],
         created_at: at(5),
       },
       { from_uid: user.id, content: '最后确认一下：时间和两个按钮只在鼠标悬浮时出现，按钮大小和间距与系统回复保持一致。', created_at: at(3) },
@@ -627,6 +660,7 @@ function storeMessage(topicId, message) {
   const seq = Number(message.seq || nextSeq++);
   const stored = {
     id: `${topic}-${seq}`,
+    seq_id: seq,
     topic_id: topic,
     topic,
     from_uid: Number(message.from_uid || message.from || 0),
@@ -674,6 +708,175 @@ function send(res, status, payload) {
     'Access-Control-Allow-Methods': 'GET, POST, PATCH, DELETE, OPTIONS',
   });
   res.end(JSON.stringify(payload));
+}
+
+function mockShareOrigin(req) {
+  const candidate = String(req.headers.origin || '').trim();
+  if (candidate) {
+    try {
+      const parsed = new URL(candidate);
+      if (parsed.protocol === 'http:' || parsed.protocol === 'https:') return parsed.origin;
+    } catch {
+      // Fall back to the current request host below.
+    }
+  }
+  const host = String(req.headers.host || `localhost:${port}`).trim();
+  return `http://${host}`;
+}
+
+function mockShareAssetForURL(value) {
+  try {
+    const pathname = new URL(String(value || ''), 'http://mock.local').pathname;
+    return mockShareDemoAssets.get(pathname) || null;
+  } catch {
+    return null;
+  }
+}
+
+function parseContentBlocks(value) {
+  if (Array.isArray(value)) return value;
+  if (typeof value !== 'string') return [];
+  try {
+    const parsed = JSON.parse(value);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+function mockShareSpeaker(user, message) {
+  if (Number(message.from_uid) === Number(user.id)) return 'self';
+  const senderIsOwnedBot = (botsByOwner.get(user.id) || [])
+    .some((bot) => Number(bot.id) === Number(message.from_uid));
+  return message.role === 'assistant' || senderIsOwnedBot ? 'assistant' : 'participant';
+}
+
+function buildMockShareBlocks(message, share) {
+  return parseContentBlocks(message.content_blocks).flatMap((block) => {
+    if (!block || typeof block !== 'object') return [];
+    let clone;
+    try {
+      clone = JSON.parse(JSON.stringify(block));
+    } catch {
+      return [];
+    }
+    if (!clone.payload || typeof clone.payload !== 'object') return [clone];
+
+    const asset = mockShareAssetForURL(clone.payload.url);
+    if (!clone.payload.url) return [clone];
+    if (!asset) {
+      // A capability share must never retain a source URL that the visitor did
+      // not receive as an isolated copy.
+      delete clone.payload.url;
+      return [clone];
+    }
+
+    const assetID = crypto.randomBytes(16).toString('hex');
+    share.assets.set(assetID, asset);
+    clone.payload.url = `/api/shared-conversations/${share.token}/assets/${assetID}`;
+    return [clone];
+  });
+}
+
+function activeMockShare(token) {
+  const share = conversationSharesByToken.get(String(token || ''));
+  if (!share || share.state !== 'active' || share.expiresAt <= Date.now()) return null;
+  return share;
+}
+
+function sendMockShareAsset(req, res, asset) {
+  let content;
+  try {
+    content = fs.readFileSync(asset.filePath);
+  } catch {
+    return send(res, 404, { error: 'share unavailable' });
+  }
+  res.writeHead(200, {
+    'Content-Type': asset.mimeType,
+    'Content-Length': content.length,
+    'Cache-Control': 'private, no-store',
+    'X-Content-Type-Options': 'nosniff',
+  });
+  res.end(req.method === 'HEAD' ? undefined : content);
+}
+
+function handleMockPublicConversationShare(req, res, url) {
+  const rest = url.pathname.slice('/api/shared-conversations/'.length);
+  const [token, section, assetID, ...extra] = rest.split('/');
+  const share = activeMockShare(token);
+  if (!share) return send(res, 404, { error: 'share unavailable' });
+
+  if (!section && req.method === 'GET') {
+    return send(res, 200, {
+      title: share.title,
+      expires_at: new Date(share.expiresAt).toISOString(),
+      items: share.items,
+    });
+  }
+  if (section === 'assets' && assetID && extra.length === 0 && (req.method === 'GET' || req.method === 'HEAD')) {
+    const asset = share.assets.get(assetID);
+    if (!asset) return send(res, 404, { error: 'share unavailable' });
+    return sendMockShareAsset(req, res, asset);
+  }
+  return send(res, 404, { error: 'share unavailable' });
+}
+
+function createMockConversationShare(req, res, user, body) {
+  const topicID = String(body.topic_id || '').trim();
+  const title = String(body.title || '会话片段').trim() || '会话片段';
+  const requestedIDs = Array.isArray(body.message_ids) ? body.message_ids.map(Number) : [];
+  const uniqueIDs = new Set(requestedIDs);
+  const expiresIn = Number(body.expires_in || 7 * 24 * 60 * 60);
+  const hasAccess = (showcaseByUserId.get(user.id)?.conversations || [])
+    .some((conversation) => conversation.id === topicID);
+
+  if (!topicID || !hasAccess) return send(res, 404, { error: 'conversation not found' });
+  if (!requestedIDs.length || requestedIDs.length > 100 || uniqueIDs.size !== requestedIDs.length || requestedIDs.some((id) => !Number.isSafeInteger(id) || id <= 0)) {
+    return send(res, 400, { error: 'select between 1 and 100 unique messages' });
+  }
+  if ([...title].length > 80) return send(res, 400, { error: 'title must be 80 characters or fewer' });
+  if (!Number.isFinite(expiresIn) || expiresIn < 60 * 60 || expiresIn > 30 * 24 * 60 * 60) {
+    return send(res, 400, { error: 'expires_in must be between 1 hour and 30 days' });
+  }
+
+  const sourceMessages = (messagesByTopic.get(topicID) || [])
+    .filter((message) => uniqueIDs.has(Number(message.seq)));
+  if (sourceMessages.length !== uniqueIDs.size) {
+    return send(res, 400, { error: 'one or more selected messages are unavailable' });
+  }
+  sourceMessages.sort((left, right) => {
+    const timeDelta = new Date(left.created_at).getTime() - new Date(right.created_at).getTime();
+    return Number.isFinite(timeDelta) && timeDelta !== 0 ? timeDelta : Number(left.seq) - Number(right.seq);
+  });
+
+  const token = crypto.randomBytes(32).toString('base64url');
+  const share = {
+    id: crypto.randomBytes(16).toString('hex'),
+    token,
+    ownerID: user.id,
+    title,
+    state: 'active',
+    expiresAt: Date.now() + expiresIn * 1000,
+    assets: new Map(),
+    items: [],
+  };
+  share.items = sourceMessages.map((message) => ({
+    id: crypto.randomBytes(16).toString('hex'),
+    speaker: mockShareSpeaker(user, message),
+    created_at: message.created_at,
+    content: typeof message.content === 'string' ? message.content : JSON.stringify(message.content || ''),
+    content_blocks: buildMockShareBlocks(message, share),
+  }));
+  conversationSharesByID.set(share.id, share);
+  conversationSharesByToken.set(token, share);
+
+  return send(res, 201, {
+    id: share.id,
+    title: share.title,
+    url: `${mockShareOrigin(req)}/share/${token}`,
+    expires_at: new Date(share.expiresAt).toISOString(),
+    message_count: share.items.length,
+  });
 }
 
 function mockTutorialTasks() {
@@ -756,6 +959,8 @@ async function handleApi(req, res) {
       agentSockets.clear();
       webSocketsByUserId.clear();
       messagesByTopic.clear();
+      conversationSharesByID.clear();
+      conversationSharesByToken.clear();
       showcaseByUserId.clear();
       projectsByUserId.clear();
       projectTopicsByUserId.clear();
@@ -779,7 +984,12 @@ async function handleApi(req, res) {
           body_id: onlineBodies.get(bot.api_key) || '',
         })),
         sessions: sessions.size,
+        conversation_shares: conversationSharesByID.size,
       });
+    }
+
+    if (url.pathname.startsWith('/api/shared-conversations/')) {
+      return handleMockPublicConversationShare(req, res, url);
     }
 
     if (req.method === 'POST' && url.pathname === '/api/auth/send-code') {
@@ -815,6 +1025,24 @@ async function handleApi(req, res) {
       const user = requireUser(req, res);
       if (!user) return;
       return send(res, 200, userPayload(user));
+    }
+
+    if (req.method === 'POST' && url.pathname === '/api/conversation-shares') {
+      const user = requireUser(req, res);
+      if (!user) return;
+      return createMockConversationShare(req, res, user, await readBody(req));
+    }
+
+    if (req.method === 'DELETE' && url.pathname.startsWith('/api/conversation-shares/')) {
+      const user = requireUser(req, res);
+      if (!user) return;
+      const shareID = url.pathname.slice('/api/conversation-shares/'.length);
+      const share = conversationSharesByID.get(shareID);
+      if (!share || share.ownerID !== user.id || share.state !== 'active') {
+        return send(res, 404, { error: 'share not found' });
+      }
+      share.state = 'revoked';
+      return send(res, 200, { revoked: true });
     }
 
     if (req.method === 'GET' && url.pathname === '/api/tutorial-tasks') {

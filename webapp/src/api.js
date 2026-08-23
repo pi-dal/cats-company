@@ -1,9 +1,17 @@
+import {
+  getAuthRevision as getSessionAuthRevision,
+  getPushPromptOwner as getSessionPushPromptOwner,
+  getToken as getSessionToken,
+  isTokenExpired as isSessionTokenExpired,
+  setToken as setSessionToken,
+} from './auth-session';
+
 const API_BASE = import.meta.env.VITE_API_BASE || '';
 const LOCAL_XIAOBA_BASE = import.meta.env.VITE_XIAOBA_LOCAL_API || '/local-xiaoba';
 const DEFAULT_WS_SCHEME = window.location.protocol === 'https:' ? 'wss' : 'ws';
 const WS_URL = import.meta.env.VITE_WS_URL || `${DEFAULT_WS_SCHEME}://${window.location.host}/v0/channels`;
 
-let token = localStorage.getItem('oc_token');
+let token = getSessionToken();
 const PUSH_REGISTRATION_ID_KEY = 'oc_push_registration_id';
 const PUSH_REGISTRATION_OWNER_KEY = 'oc_push_registration_owner';
 // A registration ID guards server deletes. sessionStorage preserves it across
@@ -94,7 +102,11 @@ const clearPushRegistration = () => {
     // The in-memory values are still cleared when storage is unavailable.
   }
 };
-let authRevision = 0;
+if (typeof window !== 'undefined') {
+  window.addEventListener('cc:auth-changed', () => {
+    token = getSessionToken();
+  });
+}
 let wsConn = null;
 let wsReconnectTimer = null;
 let wsConnectTimer = null;
@@ -105,6 +117,7 @@ let wsConnected = false;
 let topicLastSeq = {};
 let wsActiveTopic = '';
 let wsPushSubscriptionID = '';
+const inFlightReadRequests = new Map();
 
 const WS_RECONNECT_DELAYS = [1000, 2000, 4000, 8000, 15000, 30000];
 const WS_CONNECT_TIMEOUT_MS = 10000;
@@ -164,36 +177,28 @@ export function requestMissedMessages(topicId) {
 }
 
 export function setToken(t) {
-  token = t;
-  authRevision += 1;
-  if (t) localStorage.setItem('oc_token', t);
-  else {
-    localStorage.removeItem('oc_token');
+  setSessionToken(t);
+  token = getSessionToken();
+  if (!token) {
     clearPushRegistration();
     wsPushSubscriptionID = '';
     wsActiveTopic = '';
   }
-  window.dispatchEvent(new CustomEvent('cc:auth-changed', {
-    detail: {
-      loggedIn: Boolean(t),
-      revision: authRevision,
-    },
-  }));
 }
 
 export function getToken() {
-  return token;
+  return getSessionToken();
 }
 
 export function getAuthRevision() {
-  return authRevision;
+  return getSessionAuthRevision();
 }
 
 export function isCurrentAuthSession(candidate, revision) {
   return Boolean(candidate)
     && Number.isInteger(revision)
-    && token === candidate
-    && authRevision === revision;
+    && getSessionToken() === candidate
+    && getSessionAuthRevision() === revision;
 }
 
 export function getPushRegistrationID() {
@@ -207,7 +212,7 @@ export function getPushCleanupRegistrationIDs() {
 }
 
 export function getPushPromptOwner() {
-  return pushRegistrationOwnerForToken(token) || '';
+  return getSessionPushPromptOwner() || pushRegistrationOwnerForToken(getSessionToken()) || '';
 }
 
 export function getWebSocketURL() {
@@ -234,15 +239,7 @@ export function isWSConnected() {
 }
 
 export function isTokenExpired(candidate = token) {
-  if (!candidate) return false;
-  const payload = decodeTokenPayload(candidate);
-  if (!payload) return false;
-  try {
-    const expiresAt = Number(payload.exp);
-    return Number.isFinite(expiresAt) && Date.now() >= expiresAt * 1000;
-  } catch {
-    return false;
-  }
+  return isSessionTokenExpired(candidate);
 }
 
 async function request(method, path, body, options = {}) {
@@ -251,67 +248,137 @@ async function request(method, path, body, options = {}) {
   const authToken = options.authToken === undefined ? token : options.authToken;
   if (authToken) headers['Authorization'] = `Bearer ${authToken}`;
 
-  const controller = new AbortController();
-  let timedOut = false;
-  let timeoutID = null;
-  const abortFromCaller = () => controller.abort(signal?.reason);
-
-  if (signal?.aborted) {
-    abortFromCaller();
-  } else if (signal) {
-    signal.addEventListener('abort', abortFromCaller, { once: true });
-  }
-  if (Number.isFinite(timeoutMs) && timeoutMs > 0) {
-    timeoutID = setTimeout(() => {
-      timedOut = true;
-      controller.abort();
-    }, timeoutMs);
+  // Several workspace surfaces ask for the same read-only roster during the
+  // initial render. Share only requests that have no caller-owned abort or
+  // timeout so one component cannot cancel another component's request.
+  const canShare = method === 'GET'
+    && !body
+    && !signal
+    && !(Number.isFinite(timeoutMs) && timeoutMs > 0);
+  const shareKey = canShare
+    ? `${authToken || ''}\u0000${API_BASE}\u0000${path}`
+    : '';
+  if (shareKey) {
+    const existing = inFlightReadRequests.get(shareKey);
+    if (existing) return existing;
   }
 
-  let res;
-  try {
-    res = await fetch(`${API_BASE}${path}`, {
-      method,
-      headers,
-      body: body ? JSON.stringify(body) : undefined,
-      signal: controller.signal,
-    });
+  const operation = (async () => {
+    const controller = new AbortController();
+    let timedOut = false;
+    let timeoutID = null;
+    const abortFromCaller = () => controller.abort(signal?.reason);
 
-    let data = {};
+    if (signal?.aborted) {
+      abortFromCaller();
+    } else if (signal) {
+      signal.addEventListener('abort', abortFromCaller, { once: true });
+    }
+    if (Number.isFinite(timeoutMs) && timeoutMs > 0) {
+      timeoutID = setTimeout(() => {
+        timedOut = true;
+        controller.abort();
+      }, timeoutMs);
+    }
+
+    let res;
     try {
-      data = await res.json();
-    } catch {
-      data = {};
-    }
-    if (!res.ok) {
-      const error = new Error(data.error || statusMessage(res.status));
-      error.status = res.status;
-      error.data = data;
-      throw error;
-    }
-    return data;
-  } catch (cause) {
-    if (timedOut) {
-      const error = new Error('请求超时，请稍后重试');
-      error.code = 'REQUEST_TIMEOUT';
+      res = await fetch(`${API_BASE}${path}`, {
+        method,
+        headers,
+        body: body ? JSON.stringify(body) : undefined,
+        signal: controller.signal,
+      });
+
+      let data = {};
+      try {
+        data = await res.json();
+      } catch {
+        data = {};
+      }
+      if (!res.ok) {
+        const error = new Error(data.error || statusMessage(res.status));
+        error.status = res.status;
+        error.data = data;
+        throw error;
+      }
+      return data;
+    } catch (cause) {
+      if (timedOut) {
+        const error = new Error('请求超时，请稍后重试');
+        error.code = 'REQUEST_TIMEOUT';
+        error.cause = cause;
+        throw error;
+      }
+      if (signal?.aborted || cause?.name === 'AbortError') {
+        const error = new Error('请求已取消');
+        error.code = 'REQUEST_ABORTED';
+        error.cause = cause;
+        throw error;
+      }
+      if (cause?.status) throw cause;
+      const error = new Error('网络连接失败，请检查后端服务是否运行');
+      error.code = 'NETWORK_ERROR';
       error.cause = cause;
       throw error;
+    } finally {
+      if (timeoutID) clearTimeout(timeoutID);
+      signal?.removeEventListener('abort', abortFromCaller);
     }
+  })();
+
+  if (shareKey) {
+    inFlightReadRequests.set(shareKey, operation);
+    operation.then(
+      () => {
+        if (inFlightReadRequests.get(shareKey) === operation) inFlightReadRequests.delete(shareKey);
+      },
+      () => {
+        if (inFlightReadRequests.get(shareKey) === operation) inFlightReadRequests.delete(shareKey);
+      },
+    );
+  }
+  return operation;
+}
+
+// Capability-link views must never inherit an authenticated browser session.
+// Keeping this path separate from request() also prevents a guest page from
+// accidentally receiving the account token when opened in an owner's tab.
+async function publicRequest(path, options = {}) {
+  const { signal } = options;
+  let response;
+  try {
+    response = await fetch(`${API_BASE}${path}`, {
+      method: 'GET',
+      headers: { Accept: 'application/json' },
+      credentials: 'omit',
+      signal,
+    });
+  } catch (cause) {
     if (signal?.aborted || cause?.name === 'AbortError') {
       const error = new Error('请求已取消');
       error.code = 'REQUEST_ABORTED';
-      error.cause = cause;
       throw error;
     }
-    if (cause?.status) throw cause;
-    const error = new Error('网络连接失败，请检查后端服务是否运行');
+    const error = new Error('网络连接失败，请检查后重试');
     error.code = 'NETWORK_ERROR';
     error.cause = cause;
     throw error;
-  } finally {
-    if (timeoutID) clearTimeout(timeoutID);
-    signal?.removeEventListener('abort', abortFromCaller);
   }
+
+  let data = {};
+  try {
+    data = await response.json();
+  } catch {
+    // Keep the public error generic when an intermediary returns HTML.
+  }
+  if (!response.ok) {
+    const error = new Error(data.error || statusMessage(response.status));
+    error.status = response.status;
+    error.data = data;
+    throw error;
+  }
+  return data;
 }
 
 async function localRequest(method, path, body, options = {}) {
@@ -480,6 +547,7 @@ export const api = {
   register: (data) => request('POST', '/api/auth/register', data),
   login: (data) => request('POST', '/api/auth/login', data),
   getMe: () => request('GET', '/api/me'),
+  createSTTSession: () => request('POST', '/api/stt/sessions'),
   getRelayAdminAccess: () => request('GET', '/api/admin/relay/access'),
   relayAdminProxyURL: (path) => `/api/admin/relay${path}`,
   getPushConfig: (signal) => request('GET', '/api/push/config', undefined, { signal }),
@@ -570,6 +638,24 @@ export const api = {
       undefined,
       options,
     ),
+  createConversationShare: ({ topicId, messageIds, title, expiresIn }) => request(
+    'POST',
+    '/api/conversation-shares',
+    {
+      topic_id: topicId,
+      message_ids: messageIds,
+      title,
+      expires_in: expiresIn,
+    },
+  ),
+  revokeConversationShare: (shareId) => request(
+    'DELETE',
+    `/api/conversation-shares/${encodeURIComponent(shareId)}`,
+  ),
+  getConversationShare: (token, options = {}) => publicRequest(
+    `/api/shared-conversations/${encodeURIComponent(token)}`,
+    options,
+  ),
   getMessageSearch: (query, searchType = 'all', options = {}) =>
     request(
       'GET',
@@ -715,6 +801,7 @@ export const api = {
     request('GET', `/api/bots/model-config?uid=${uid}${includeUsage ? '&include_usage=1' : ''}`),
   updateBotModelConfig: (uid, modelConfig) => request('PATCH', `/api/bots/model-config?uid=${uid}`, modelConfig),
   getBotDefinitionSkills: (uid) => request('GET', `/api/bots/definition/skills?uid=${encodeURIComponent(uid)}`),
+  getAgentSkills: (uid) => request('GET', `/api/agents/skills?uid=${encodeURIComponent(uid)}`),
   updateBotDefinitionSkills: (uid, revision, skills) => request(
     'PATCH',
     `/api/bots/definition/skills?uid=${encodeURIComponent(uid)}`,

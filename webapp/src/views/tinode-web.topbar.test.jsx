@@ -123,6 +123,26 @@ describe('model reasoning menu placement', () => {
   });
 });
 
+describe('LocalAssistantBar narrow-pane layout', () => {
+  it('keeps the action group visible as a non-shrinking row', () => {
+    expect(topbarCss).toMatch(
+      /\.v3-shell-actions\s*\{[^}]*display:\s*flex;[^}]*align-items:\s*center;[^}]*flex:\s*0\s+0\s+auto;/s,
+    );
+    expect(topbarCss).toMatch(
+      /@media\s*\(max-width:\s*520px\)[\s\S]*?\.v3-shell-actions\s*\{[^}]*min-width:\s*max-content;[^}]*overflow:\s*visible;/s,
+    );
+  });
+
+  it('lets a long title grow below the actions on narrow screens', () => {
+    expect(topbarCss).toMatch(
+      /@media\s*\(max-width:\s*520px\)[\s\S]*?grid-template-areas:\s*"model actions"\s*"title title";/s,
+    );
+    expect(topbarCss).toMatch(
+      /@media\s*\(max-width:\s*520px\)[\s\S]*?grid-template-rows:\s*38px\s+24px;/s,
+    );
+  });
+});
+
 describe('resolveDisplayedActiveAgent', () => {
   it('exposes an owned draft agent to the model selector before the task is created', () => {
     expect(resolveDisplayedActiveAgent('', null, {
@@ -147,12 +167,14 @@ describe('resolveDisplayedActiveAgent', () => {
 });
 
 describe('cloud artifact action visibility', () => {
-  it('is available whenever the active conversation resolves to a capable agent', () => {
+  it('is available for an active conversation or a selected draft agent', () => {
     const doubao = { uid: 440, cloud_artifacts_enabled: true };
     expect(canOpenCloudArtifacts({ topicId: 'p2p_7_440', isGroup: false }, doubao)).toBe(true);
     expect(canOpenCloudArtifacts({ topicId: 'grp_8', isGroup: true }, doubao)).toBe(true);
-    expect(canOpenCloudArtifacts({ topicId: 'p2p_7_441', isGroup: false }, { uid: 441 })).toBe(false);
-    expect(canOpenCloudArtifacts(null, doubao)).toBe(false);
+    expect(canOpenCloudArtifacts({ topicId: 'p2p_7_441', isGroup: false }, { uid: 441 })).toBe(true);
+    expect(canOpenCloudArtifacts({ topicId: 'p2p_7_441', isGroup: false }, null)).toBe(false);
+    expect(canOpenCloudArtifacts(null, doubao)).toBe(true);
+    expect(canOpenCloudArtifacts(null, null)).toBe(false);
   });
 });
 
@@ -257,16 +279,19 @@ describe('LocalAssistantBar model selector', () => {
     expect(container.querySelector('button[aria-label="中转用量"]')).toBeNull();
   });
 
-  it('renders the generated-artifacts button only when the parent enables it', async () => {
+  it('always renders the artifacts button and disables it until an agent is available', async () => {
     const onOpenCloudArtifacts = vi.fn();
     await renderBar({ onOpenCloudArtifacts });
     const button = container.querySelector('button[aria-label="打开产物"]');
     expect(button).toBeTruthy();
+    expect(button.disabled).toBe(false);
     await act(async () => button.click());
     expect(onOpenCloudArtifacts).toHaveBeenCalledTimes(1);
 
     await renderBar({ onOpenCloudArtifacts: undefined });
-    expect(container.querySelector('button[aria-label="打开产物"]')).toBeNull();
+    const unavailableButton = container.querySelector('button[aria-label="产物暂不可用"]');
+    expect(unavailableButton).toBeTruthy();
+    expect(unavailableButton.disabled).toBe(true);
   });
 
   it('keeps the current model and quota together in the header', async () => {

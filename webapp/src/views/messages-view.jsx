@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect, useCallback, useId, useMemo } from 'react';
-import { ArrowLeft, CheckCircle2, ChevronDown, ChevronRight, Circle, CircleDot, FileText, Image, LoaderCircle, RefreshCw, Smartphone, Users, X } from 'lucide-react';
+import { ArrowLeft, CheckCircle2, ChevronDown, ChevronRight, Circle, CircleDot, FileText, Image, Link2, LoaderCircle, RefreshCw, Smartphone, Users, X } from 'lucide-react';
 import { api, wsSendMessage, wsSendStreamCancel, wsSendTyping, wsSendRead, onWSMessage, updateTopicSeq } from '../api';
 import t from '../i18n';
 import ChatMessage, { createCloudArtifactPreviewFile, FilePreviewPanel } from '../widgets/chat-message';
@@ -9,6 +9,8 @@ import QRCode from '../widgets/qr-code';
 import { TutorialEmptyState, TutorialTaskModal, TutorialTaskPicker, TUTORIAL_TASKS } from '../widgets/tutorial-tasks';
 import { attachmentFromContentBlock, attachmentIdentity, clearChatAttachmentDrag, hasChatAttachmentDrag, readChatAttachmentDrag } from '../chat-attachment-drag';
 import ChatComposer from '../widgets/chat-composer';
+import ConversationShareReview from '../widgets/conversation-share-review';
+import '../css/conversation-share.css';
 import { IMAGE_UPLOAD_ACCEPT, MAX_ATTACHMENT_SIZE, MAX_ATTACHMENT_SIZE_MB, inferAttachmentType, validateImageUpload } from '../utils/upload-rules';
 
 const PAGE_SIZE = 50;
@@ -39,6 +41,14 @@ const PREVIEW_WIDTH_MIN = 360;
 const PREVIEW_WIDTH_DEFAULT = 640;
 const PREVIEW_WIDTH_MAX = 980;
 const CLOUD_ARTIFACTS_CHANGED_EVENT = 'cc:cloud-artifacts-changed';
+
+function isShareableTranscriptMessage(message) {
+  if (!message || message._streaming || historyMessageID(message) <= 0) return false;
+  const type = String(message.type || message.msg_type || '').trim().toLowerCase();
+  if (WORKING_MESSAGE_TYPES.has(type)) return false;
+  return !['runtime_plan', 'debug', 'stream_delta', 'stream_cancel', 'task_status'].includes(type)
+    && message._display_text_role !== 'process';
+}
 
 function questionNavigationKey(message, index) {
   return String(message?.id ?? message?.seq_id ?? `question-${index}`);
@@ -301,8 +311,10 @@ export default function MessagesView({
     const saved = localStorage.getItem('cc_show_thinking');
     return saved === null ? true : saved === 'true';
   });
+  const [shareSelectionActive, setShareSelectionActive] = useState(false);
+  const [selectedShareMessageIDs, setSelectedShareMessageIDs] = useState([]);
+  const [shareReviewOpen, setShareReviewOpen] = useState(false);
   const sidePanelOpen = Boolean(previewFile || (cloudArtifactsListOpen && cloudArtifactsAgentUID > 0));
-  const bottomRef = useRef(null);
   const chatColumnRef = useRef(null);
   const lastTypingSent = useRef(0);
   const peerTypingTimer = useRef(null);
@@ -314,6 +326,8 @@ export default function MessagesView({
   const messageHighlightTimerRef = useRef(null);
   const previousScrollRef = useRef(null);
   const stickToBottomRef = useRef(true);
+  const lastTimelineScrollTopRef = useRef(0);
+  const timelineTouchYRef = useRef(null);
   const fileInputRef = useRef(null);
   const imageInputRef = useRef(null);
   const textareaRef = useRef(null);
@@ -490,20 +504,6 @@ export default function MessagesView({
     setCloudArtifactsListOpen(true);
   }, []);
 
-  const resizeComposerInput = useCallback(() => {
-    const textarea = textareaRef.current;
-    if (!textarea) return;
-    const maxHeight = 200;
-    textarea.style.height = 'auto';
-    const nextHeight = Math.min(Math.max(textarea.scrollHeight, 40), maxHeight);
-    textarea.style.height = `${nextHeight}px`;
-    textarea.style.overflowY = textarea.scrollHeight > maxHeight ? 'auto' : 'hidden';
-  }, []);
-
-  useEffect(() => {
-    resizeComposerInput();
-  }, [input, resizeComposerInput]);
-
   useEffect(() => {
     setTutorialDismissed(localStorage.getItem(tutorialDismissStorageKey(user.uid, topic)) === '1');
   }, [topic, user.uid]);
@@ -623,6 +623,8 @@ export default function MessagesView({
     loadingOlderRef.current = false;
     questionIndexRequestRef.current += 1;
     stickToBottomRef.current = true;
+    lastTimelineScrollTopRef.current = 0;
+    timelineTouchYRef.current = null;
     setHasMoreHistory(Boolean(cachedHistory?.hasMore));
     setLoadingOlder(false);
     setIsStopRequested(false);
@@ -662,11 +664,12 @@ export default function MessagesView({
   useEffect(() => {
     const agentUID = Number(cloudArtifactsRequest?.agentUid || 0);
     if (agentUID <= 0 || !cloudArtifactsRequest?.requestId) return;
+    if (cloudArtifactsRequest.topicId && cloudArtifactsRequest.topicId !== topic) return;
     setPreviewFile(null);
     setCloudArtifactsAgentUID(agentUID);
-    setCloudArtifactsTab('files');
+    setCloudArtifactsTab(cloudArtifactsRequest.initialTab === 'active' ? 'active' : 'files');
     setCloudArtifactsListOpen(true);
-  }, [cloudArtifactsRequest]);
+  }, [cloudArtifactsRequest, topic]);
 
   useEffect(() => {
     const preventBrowserFileOpen = (event) => {
@@ -885,7 +888,9 @@ export default function MessagesView({
     return () => unsub();
   }, [clearLiveWorking, groupId, isGroup, markLiveWorking, topic, user.uid]);
 
-  // Auto-scroll to bottom or restore scroll anchor depending on state
+  // Restore an older-history anchor, or follow actual chat messages while the
+  // reader remains at the latest position. Runtime-only state must not move a
+  // reader who is reviewing the conversation.
   React.useLayoutEffect(() => {
     const timeline = timelineRef.current;
     if (!timeline) return;
@@ -896,12 +901,15 @@ export default function MessagesView({
       const newScrollHeight = timeline.scrollHeight;
       timeline.scrollTop = scrollTop + (newScrollHeight - scrollHeight);
       previousScrollRef.current = null; // Clear atomic lock
+      lastTimelineScrollTopRef.current = timeline.scrollTop;
       stickToBottomRef.current = isTimelineNearBottom(timeline);
     } else if (stickToBottomRef.current) {
-      // Only follow fresh messages while the user is already near the bottom.
-      bottomRef.current?.scrollIntoView({ behavior: 'auto' });
+      // Keep scrolling contained to the conversation. scrollIntoView() can
+      // also move the PWA's outer viewport on mobile browsers.
+      timeline.scrollTop = timeline.scrollHeight;
+      lastTimelineScrollTopRef.current = timeline.scrollTop;
     }
-  }, [messages, runtimePlan, peerTyping]);
+  }, [messages]);
 
   const loadQuestionNavigationHistory = useCallback(async ({ continueOlder = false } = {}) => {
     const targetTopic = topic;
@@ -1630,6 +1638,28 @@ export default function MessagesView({
       lastTypingSent.current = now;
       wsSendTyping(topic);
     }
+  };
+
+  const handleVoiceFinal = (transcript, insertion) => {
+    const text = String(transcript || '').trim();
+    if (!text) return;
+    const textarea = textareaRef.current;
+    const currentInput = insertion?.baseValue ?? (textarea ? textarea.value : input);
+    const start = insertion?.start ?? (textarea ? textarea.selectionStart : currentInput.length);
+    const end = insertion?.end ?? (textarea ? textarea.selectionEnd : start);
+    const nextInput = currentInput.slice(0, start) + text + currentInput.slice(end);
+    const nextStructuredMentions = reconcileStructuredMentionSelections(
+      currentInput,
+      nextInput,
+      structuredMentionDraftsRef.current.get(topic) || [],
+    );
+    setInput(nextInput);
+    updateComposerDraft(topic, nextInput);
+    updateStructuredMentionDraft(topic, nextStructuredMentions);
+    setTimeout(() => {
+      textareaRef.current?.focus();
+      textareaRef.current?.setSelectionRange(start + text.length, start + text.length);
+    }, 0);
   };
 
   const insertMention = (member) => {
@@ -2504,7 +2534,6 @@ export default function MessagesView({
     setSelectedTutorialTask(null);
     window.setTimeout(() => {
       textareaRef.current?.focus();
-      resizeComposerInput();
     }, 0);
   };
 
@@ -2538,10 +2567,8 @@ export default function MessagesView({
       if (!textarea) return;
       textarea.focus();
       textarea.setSelectionRange(originalText.length, originalText.length);
-      resizeComposerInput();
     }, 0);
   }, [
-    resizeComposerInput,
     topic,
     updateAttachmentDraft,
     updateComposerDraft,
@@ -2710,7 +2737,16 @@ export default function MessagesView({
 
   const handleTimelineScroll = (e) => {
     const el = e.target;
-    stickToBottomRef.current = isTimelineNearBottom(el);
+    const currentScrollTop = el.scrollTop;
+    const movedUp = currentScrollTop < lastTimelineScrollTopRef.current;
+    lastTimelineScrollTopRef.current = currentScrollTop;
+    // A deliberate upward move is an immediate opt-out from auto-follow.
+    // The near-bottom threshold is retained only for an explicit return down.
+    if (movedUp) {
+      stickToBottomRef.current = false;
+    } else if (isTimelineNearBottom(el)) {
+      stickToBottomRef.current = true;
+    }
     const pendingQuestionKey = pendingQuestionJumpRef.current;
     if (pendingQuestionKey) {
       setActiveQuestionKey((current) => current === pendingQuestionKey ? current : pendingQuestionKey);
@@ -2724,6 +2760,57 @@ export default function MessagesView({
     }
   };
 
+  const handleTimelineWheel = (event) => {
+    clearPendingQuestionJump();
+    if (event.deltaY < 0) {
+      stickToBottomRef.current = false;
+    }
+  };
+
+  const handleTimelineTouchStart = (event) => {
+    clearPendingQuestionJump();
+    timelineTouchYRef.current = event.touches?.[0]?.clientY ?? null;
+  };
+
+  const handleTimelineTouchMove = (event) => {
+    const currentTouchY = event.touches?.[0]?.clientY;
+    const previousTouchY = timelineTouchYRef.current;
+    if (Number.isFinite(currentTouchY) && Number.isFinite(previousTouchY) && currentTouchY > previousTouchY) {
+      stickToBottomRef.current = false;
+    }
+    timelineTouchYRef.current = Number.isFinite(currentTouchY) ? currentTouchY : null;
+  };
+
+  const handleTimelineTouchEnd = () => {
+    timelineTouchYRef.current = null;
+  };
+
+  useEffect(() => {
+    setShareSelectionActive(false);
+    setSelectedShareMessageIDs([]);
+    setShareReviewOpen(false);
+  }, [topic]);
+
+  const startShareSelection = () => {
+    setShareSelectionActive(true);
+    setSelectedShareMessageIDs([]);
+    setShareReviewOpen(false);
+  };
+
+  const cancelShareSelection = () => {
+    setShareSelectionActive(false);
+    setSelectedShareMessageIDs([]);
+    setShareReviewOpen(false);
+  };
+
+  const toggleShareMessage = (messageID) => {
+    setSelectedShareMessageIDs((current) => (
+      current.includes(messageID)
+        ? current.filter((id) => id !== messageID)
+        : [...current, messageID]
+    ));
+  };
+
   return (
     <>
       <div
@@ -2732,6 +2819,41 @@ export default function MessagesView({
       >
         <div ref={chatColumnRef} className="v3-chat-column">
           {topBar}
+          <div className="cc-conversation-share-toolbar">
+            {!shareSelectionActive ? (
+              <button
+                type="button"
+                className="cc-conversation-share-trigger"
+                onClick={startShareSelection}
+                disabled={!historyLoaded}
+                title="选择消息并创建只读分享链接"
+              >
+                <Link2 size={16} />
+                分享片段
+              </button>
+            ) : (
+              <>
+                <span className="cc-conversation-share-toolbar-copy">已选 {selectedShareMessageIDs.length} 条，仅分享这些内容</span>
+                <button type="button" onClick={cancelShareSelection}>取消</button>
+                <button
+                  type="button"
+                  className="is-primary"
+                  disabled={selectedShareMessageIDs.length === 0}
+                  onClick={() => setShareReviewOpen(true)}
+                >
+                  下一步
+                </button>
+              </>
+            )}
+          </div>
+          {shareSelectionActive && shareReviewOpen && (
+            <ConversationShareReview
+              topicId={topic}
+              messageIds={selectedShareMessageIDs}
+              onClose={() => setShareReviewOpen(false)}
+              onComplete={cancelShareSelection}
+            />
+          )}
           {messageLocationRequest?.topicId === topic && onBackToSearch && (
             <button type="button" className="cc-search-return" onClick={onBackToSearch}>
               <ArrowLeft size={16} />
@@ -2742,8 +2864,11 @@ export default function MessagesView({
             className={`v3-timeline${isDragActive ? ' is-drag-active' : ''}`}
             ref={timelineRef}
             onScroll={handleTimelineScroll}
-            onWheel={clearPendingQuestionJump}
-            onTouchStart={clearPendingQuestionJump}
+            onWheel={handleTimelineWheel}
+            onTouchStart={handleTimelineTouchStart}
+            onTouchMove={handleTimelineTouchMove}
+            onTouchEnd={handleTimelineTouchEnd}
+            onTouchCancel={handleTimelineTouchEnd}
             onPointerDown={clearPendingQuestionJump}
             onDragEnter={handleDragEnter}
             onDragOver={handleDragOver}
@@ -2847,12 +2972,25 @@ export default function MessagesView({
               </div>
             );
           }
+          const shareMessageID = historyMessageID(group.message);
+          const shareable = isShareableTranscriptMessage(group.message);
+          const selectedForShare = selectedShareMessageIDs.includes(shareMessageID);
           return (
             <div
               key={group.message.id || i}
-              className={`cc-message-anchor${historyMessageID(group.message) === highlightedMessageId ? ' cc-message-search-hit' : ''}`}
+              className={`cc-message-anchor${historyMessageID(group.message) === highlightedMessageId ? ' cc-message-search-hit' : ''}${shareSelectionActive && shareable ? ' cc-share-selectable' : ''}${selectedForShare ? ' is-selected' : ''}`}
               data-search-message-id={historyMessageID(group.message) || undefined}
             >
+            {shareSelectionActive && shareable && (
+              <label className="cc-conversation-share-selection" title={selectedForShare ? '取消选择这条消息' : '选择这条消息'}>
+                <input
+                  type="checkbox"
+                  checked={selectedForShare}
+                  aria-label={selectedForShare ? '取消选择这条消息' : '选择这条消息'}
+                  onChange={() => toggleShareMessage(shareMessageID)}
+                />
+              </label>
+            )}
             <ChatMessage
               message={group.message}
               isSelf={sameUID(group.message.from_uid, user.uid)}
@@ -2864,9 +3002,9 @@ export default function MessagesView({
               questionAnchorKey={sameUID(group.message.from_uid, user.uid)
                 ? questionNavigationKey(group.message, i)
                 : undefined}
-              onReply={() => setReplyTo(group.message)}
-              onEdit={sameUID(group.message.from_uid, user.uid) ? handleEditMessage : undefined}
-              onRegenerate={canRegenerateAssistantMessages
+              onReply={shareSelectionActive ? undefined : () => setReplyTo(group.message)}
+              onEdit={!shareSelectionActive && sameUID(group.message.from_uid, user.uid) ? handleEditMessage : undefined}
+              onRegenerate={!shareSelectionActive && canRegenerateAssistantMessages
                 && !sameUID(group.message.from_uid, user.uid)
                 && isAssistantAuthoredMessage(group.message, group.sender.isBot)
                 ? handleRegenerateMessage
@@ -2889,7 +3027,6 @@ export default function MessagesView({
               <span className="v3-peer-typing-label">{t('typing')}</span>
             </div>
           )}
-          <div ref={bottomRef} />
         </div>
       </div>
 
@@ -2980,10 +3117,13 @@ export default function MessagesView({
         textareaRef={textareaRef}
         value={input}
         placeholder={composerPlaceholder}
-        disabled={isSendingMessage}
+        disabled={isSendingMessage || shareSelectionActive}
         onChange={handleInputChange}
         onKeyDown={handleKeyDown}
         onPaste={handlePaste}
+        onVoiceFinal={handleVoiceFinal}
+        voiceInputDisabled={isSendingMessage || isUploadingAttachment || shareSelectionActive}
+        voiceSessionKey={topic}
         textareaProps={{
           'aria-controls': showMentionPicker ? 'mention-picker' : undefined,
           'aria-expanded': showMentionPicker,
@@ -2993,7 +3133,7 @@ export default function MessagesView({
             : undefined,
         }}
         attachmentOpen={attachmentMenuOpen}
-        attachmentDisabled={isUploadingAttachment || isSendingMessage}
+        attachmentDisabled={isUploadingAttachment || isSendingMessage || shareSelectionActive}
         onAttachmentToggle={() => {
           setAttachmentMenuOpen((open) => !open);
         }}
@@ -3006,8 +3146,8 @@ export default function MessagesView({
           </div>
         )}
         onSend={handleSend}
-        sendDisabled={isSendingMessage || isUploadingAttachment || (!input.trim() && pendingAttachments.length === 0)}
-        stop={canStopActiveBotWorking && !input.trim() && pendingAttachments.length === 0}
+        sendDisabled={shareSelectionActive || isSendingMessage || isUploadingAttachment || (!input.trim() && pendingAttachments.length === 0)}
+        stop={!shareSelectionActive && canStopActiveBotWorking && !input.trim() && pendingAttachments.length === 0}
         stopDisabled={isStopRequested}
         onStop={handleStopGeneration}
         onCloseMenus={() => {
@@ -3647,7 +3787,7 @@ function assistantProcessMessage(message) {
 
 function messageHasDeliveryArtifact(message) {
   if (Array.isArray(message?.content_blocks)) {
-    if (message.content_blocks.some((block) => block?.type === 'file' || block?.type === 'image')) {
+    if (message.content_blocks.some((block) => ['file', 'image', 'audio', 'voice'].includes(block?.type))) {
       return true;
     }
   }
@@ -3660,7 +3800,7 @@ function messageHasDeliveryArtifact(message) {
       return false;
     }
   }
-  return content?.type === 'file' || content?.type === 'image';
+  return ['file', 'image', 'audio', 'voice'].includes(content?.type);
 }
 
 function displayGroupHasDeliveryArtifact(group) {
@@ -3671,7 +3811,7 @@ function displayGroupHasDeliveryArtifact(group) {
 function deliveryArtifactBlocks(message) {
   if (Array.isArray(message?.content_blocks)) {
     const storedBlocks = message.content_blocks.filter(
-      (block) => block?.type === 'file' || block?.type === 'image',
+      (block) => ['file', 'image', 'audio', 'voice'].includes(block?.type),
     );
     if (storedBlocks.length > 0) return storedBlocks;
   }
@@ -3684,7 +3824,7 @@ function deliveryArtifactBlocks(message) {
       return [];
     }
   }
-  return content?.type === 'file' || content?.type === 'image' ? [content] : [];
+  return ['file', 'image', 'audio', 'voice'].includes(content?.type) ? [content] : [];
 }
 
 function hasAssistantBlockFormatting(value) {
@@ -3750,12 +3890,12 @@ function assistantOutputText(message) {
   if (content) {
     try {
       const parsed = JSON.parse(content);
-      if (parsed?.type === 'file' || parsed?.type === 'image') return '';
+      if (['file', 'image', 'audio', 'voice'].includes(parsed?.type)) return '';
     } catch (error) {
       // Plain assistant text.
     }
   }
-  if (/^\[(?:文件|图片)\]\s*[^\n]*$/u.test(content)) return '';
+  if (/^\[(?:文件|图片|语音)\]\s*[^\n]*$/u.test(content)) return '';
   return content;
 }
 

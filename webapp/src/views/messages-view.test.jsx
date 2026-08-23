@@ -127,6 +127,8 @@ vi.mock('../api', () => ({
     getAgentFiles: vi.fn(),
     deleteCloudArtifact: vi.fn(),
     restoreCloudArtifact: vi.fn(),
+    createConversationShare: vi.fn(),
+    revokeConversationShare: vi.fn(),
   },
   wsSendMessage: vi.fn(),
   wsSendStreamCancel: vi.fn(),
@@ -311,6 +313,12 @@ describe('MessagesView composer draft isolation', () => {
     api.getTutorialTasks.mockResolvedValue({ tasks: [], limit: 6 });
     api.getCloudArtifacts.mockResolvedValue({ artifacts: [] });
     api.getAgentFiles.mockResolvedValue({ files: [], has_more: false, next_before_id: 0 });
+    api.createConversationShare.mockResolvedValue({
+      id: 'share-1',
+      url: 'https://app.catsco.cc/share/capability',
+      message_count: 1,
+    });
+    api.revokeConversationShare.mockResolvedValue({ revoked: true });
     api.uploadFile.mockResolvedValue({
       file_key: '20260610_default.jpg',
       url: '/uploads/images/20260610_default.jpg',
@@ -490,6 +498,51 @@ describe('MessagesView composer draft isolation', () => {
     const message = container.querySelector('.mock-chat-message[data-message-id="72"]');
     expect(message?.dataset.senderName).toBe('Design Agent');
     expect(message?.dataset.senderAvatar).toBe('/uploads/design-agent.png');
+  });
+
+  it('selects exact visible messages before creating a read-only share', async () => {
+    api.getMessages.mockResolvedValueOnce({
+      messages: [
+        { id: 17, seq_id: 17, topic_id: 'p2p_1_2', from_uid: 1, type: 'text', content: '要分享的问题' },
+        { id: 23, seq_id: 23, topic_id: 'p2p_1_2', from_uid: 2, type: 'text', content: '要分享的回答' },
+      ],
+    });
+    api.getFriends.mockResolvedValueOnce({
+      friends: [{ id: 2, display_name: 'CatsCo', is_bot: true }],
+    });
+
+    await mountTopic(root, 'p2p_1_2');
+    await act(async () => {
+      await flushPromises();
+      Simulate.click(container.querySelector('.cc-conversation-share-trigger'));
+    });
+
+    const selections = Array.from(container.querySelectorAll('.cc-conversation-share-selection input'));
+    expect(selections).toHaveLength(2);
+    await act(async () => {
+      selections[0].checked = true;
+      Simulate.change(selections[0], { target: { checked: true } });
+      selections[1].checked = true;
+      Simulate.change(selections[1], { target: { checked: true } });
+    });
+    expect(container.querySelector('.cc-conversation-share-toolbar')?.textContent).toContain('已选 2 条');
+
+    await act(async () => {
+      Simulate.click(Array.from(container.querySelectorAll('.cc-conversation-share-toolbar button'))
+        .find((button) => button.textContent.includes('下一步')));
+    });
+    expect(container.querySelector('.cc-conversation-share-review')).not.toBeNull();
+
+    await act(async () => {
+      Simulate.submit(container.querySelector('.cc-conversation-share-review form'));
+      await flushPromises();
+    });
+    expect(api.createConversationShare).toHaveBeenCalledWith({
+      topicId: 'p2p_1_2',
+      messageIds: [17, 23],
+      title: '会话片段',
+      expiresIn: 604800,
+    });
   });
 
   it('keeps sender metadata on the first visible reply when thinking is hidden', async () => {
@@ -4344,6 +4397,123 @@ describe('MessagesView composer draft isolation', () => {
 
     expect(container.textContent).not.toContain('输入');
     expect(container.querySelector('.v3-peer-typing')).toBeNull();
+  });
+
+  it('keeps a manually up-scrolled conversation fixed during a runtime-plan update', async () => {
+    await mountTopic(root, 'p2p_1_2');
+    const timeline = container.querySelector('.v3-timeline');
+    Object.defineProperty(timeline, 'scrollHeight', { configurable: true, value: 1000 });
+    Object.defineProperty(timeline, 'clientHeight', { configurable: true, value: 500 });
+
+    timeline.scrollTop = 500;
+    await act(async () => {
+      Simulate.scroll(timeline);
+      await Promise.resolve();
+    });
+
+    timeline.scrollTop = 444;
+    await act(async () => {
+      Simulate.wheel(timeline, { deltaY: -56 });
+      Simulate.scroll(timeline);
+      await Promise.resolve();
+    });
+
+    const scrollCallsBeforeUpdate = window.HTMLElement.prototype.scrollIntoView.mock.calls.length;
+    await act(async () => {
+      wsHandler({
+        data: {
+          seq_id: 28,
+          seq: 28,
+          topic: 'p2p_1_2',
+          from: 'usr2',
+          content: {
+            revision: 1,
+            updatedAt: Date.now(),
+            steps: [{ text: '仍在加载', status: 'in_progress' }],
+          },
+          type: 'runtime_plan',
+          msg_type: 'runtime_plan',
+        },
+      });
+      await Promise.resolve();
+    });
+
+    expect(timeline.scrollTop).toBe(444);
+    expect(window.HTMLElement.prototype.scrollIntoView)
+      .toHaveBeenCalledTimes(scrollCallsBeforeUpdate);
+  });
+
+  it('stops auto-follow when a touch drag moves toward older messages', async () => {
+    await mountTopic(root, 'p2p_1_2');
+    const timeline = container.querySelector('.v3-timeline');
+    Object.defineProperty(timeline, 'scrollHeight', { configurable: true, value: 1000 });
+    Object.defineProperty(timeline, 'clientHeight', { configurable: true, value: 500 });
+
+    timeline.scrollTop = 500;
+    await act(async () => {
+      Simulate.scroll(timeline);
+      Simulate.touchStart(timeline, { touches: [{ clientY: 320 }] });
+      Simulate.touchMove(timeline, { touches: [{ clientY: 376 }] });
+      await Promise.resolve();
+    });
+    timeline.scrollTop = 444;
+
+    const scrollCallsBeforeUpdate = window.HTMLElement.prototype.scrollIntoView.mock.calls.length;
+    await act(async () => {
+      wsHandler({
+        data: {
+          seq_id: 30,
+          seq: 30,
+          topic: 'p2p_1_2',
+          from: 'usr2',
+          content: '正在处理',
+          type: 'tool_use',
+          msg_type: 'tool_use',
+          metadata: { id: 'tool-30', input: { task: '加载进度' } },
+        },
+      });
+      await Promise.resolve();
+    });
+
+    expect(timeline.scrollTop).toBe(444);
+    expect(window.HTMLElement.prototype.scrollIntoView)
+      .toHaveBeenCalledTimes(scrollCallsBeforeUpdate);
+  });
+
+  it('follows fresh messages within the timeline without scrolling the page', async () => {
+    const initialHistory = deferred();
+    api.getMessages.mockImplementationOnce(() => initialHistory.promise);
+
+    await mountTopic(root, 'p2p_1_2');
+    const timeline = container.querySelector('.v3-timeline');
+    let scrollTop = 0;
+    Object.defineProperty(timeline, 'scrollHeight', { configurable: true, value: 1000 });
+    Object.defineProperty(timeline, 'clientHeight', { configurable: true, value: 500 });
+    Object.defineProperty(timeline, 'scrollTop', {
+      configurable: true,
+      get: () => scrollTop,
+      set: (value) => {
+        scrollTop = value;
+      },
+    });
+
+    await act(async () => {
+      initialHistory.resolve({
+        messages: [{
+          id: 29,
+          seq_id: 29,
+          topic_id: 'p2p_1_2',
+          from_uid: 2,
+          type: 'text',
+          content: '最新回复',
+        }],
+        has_more: false,
+      });
+      await flushPromises();
+    });
+
+    expect(scrollTop).toBe(1000);
+    expect(window.HTMLElement.prototype.scrollIntoView).not.toHaveBeenCalled();
   });
 
   it('hides the transient runtime plan once the same plan is persisted in working messages', async () => {

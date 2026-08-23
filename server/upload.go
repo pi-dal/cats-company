@@ -509,11 +509,18 @@ func (h *UploadHandler) HandleServeFile(w http.ResponseWriter, r *http.Request) 
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.Header().Set("Referrer-Policy", "no-referrer")
 	w.Header().Set("Cache-Control", "no-store")
+	forceDownload := r.URL.Query().Get("download") == "1"
+	if forceDownload {
+		w.Header().Set("Content-Disposition", "attachment")
+	}
 	if subDir == "files" {
-		forceDownload := r.URL.Query().Get("download") == "1"
-		w.Header().Set("Content-Disposition", contentDispositionForUploadFile(fileName, ext, forceDownload))
+		if !forceDownload {
+			w.Header().Set("Content-Disposition", contentDispositionForUploadFile(fileName, ext, false))
+		}
 		if videoMime, ok := inlineVideoMimeType(ext); ok {
 			w.Header().Set("Content-Type", videoMime)
+		} else if audioMime, ok := inlineAudioMimeType(ext); ok {
+			w.Header().Set("Content-Type", audioMime)
 		}
 		if isHTMLUploadExtension(ext) && !forceDownload {
 			// Uploaded HTML may contain active content. Let browsers render it for
@@ -529,7 +536,7 @@ func contentDispositionForUploadFile(fileName, ext string, forceDownload bool) s
 		return "attachment"
 	}
 	disposition := "attachment"
-	if strings.EqualFold(ext, ".pdf") || isHTMLUploadExtension(ext) || isInlineVideoExt(ext) {
+	if strings.EqualFold(ext, ".pdf") || isHTMLUploadExtension(ext) || isInlineVideoExt(ext) || isInlineAudioExt(ext) {
 		disposition = "inline"
 	}
 	return fmt.Sprintf("%s; filename=%q", disposition, fileName)
@@ -550,6 +557,24 @@ func inlineVideoMimeType(ext string) (string, bool) {
 		return "video/ogg", true
 	case ".mov":
 		return "video/quicktime", true
+	default:
+		return "", false
+	}
+}
+
+func isInlineAudioExt(ext string) bool {
+	_, ok := inlineAudioMimeType(ext)
+	return ok
+}
+
+func inlineAudioMimeType(ext string) (string, bool) {
+	switch strings.ToLower(ext) {
+	case ".mp3":
+		return "audio/mpeg", true
+	case ".ogg":
+		return "audio/ogg", true
+	case ".wav":
+		return "audio/wav", true
 	default:
 		return "", false
 	}

@@ -1,0 +1,11 @@
+/*
+ * The compact workspace prioritizes first interaction over custom typefaces.
+ * These system stacks are already available on the devices that use this
+ * breakpoint, so the browser can skip fetching the workspace font files.
+ */
+@media (max-width: 768px) {
+  :root {
+    --cc-font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+    --cc-font-mono: ui-monospace, "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  }
+}

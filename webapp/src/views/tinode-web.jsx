@@ -1,20 +1,10 @@
-import React, { useState, useEffect, useCallback, useRef } from 'react';
+import React, { Suspense, lazy, useState, useEffect, useCallback, useRef } from 'react';
 import { createPortal } from 'react-dom';
 import { api, setToken, getToken, getAuthRevision, isCurrentAuthSession, getPushCleanupRegistrationIDs, connectWS, reconnectWS, disconnectWS, sendWSActiveTopic, sendWSPageFocus, sendWSPageVisibility } from '../api';
 import { enqueuePushOperation } from '../utils/push-operation';
 import { pushTabCoordinator } from '../utils/push-tab-coordination';
 import { cleanupPushForSession } from '../utils/push-session-cleanup';
 import t from '../i18n';
-import RelayAdminPanel from './relay-admin-panel';
-import ChatListView from './sidepanel-view';
-import FriendsView from './friends-view';
-import MessagesView from './messages-view';
-import SearchOverlay from './search-overlay';
-import AgentEntryBindView from './agent-entry-bind-view';
-import ChannelDeviceLinkView from './channel-device-link-view';
-import MobileUploadView from './mobile-upload-view';
-import SkillHubView from './skillhub-view';
-import EmptyTaskComposer from '../widgets/empty-task-composer';
 import SidebarResizeHandle, {
   MIN_APP_SIDEBAR_WIDTH,
   clampSidebarWidth,
@@ -22,17 +12,8 @@ import SidebarResizeHandle, {
   loadSidebarWidth,
   saveSidebarWidth,
 } from '../widgets/sidebar-resizer';
-import ProfileEditor from '../widgets/profile-editor';
-import FeedbackModal from '../widgets/feedback-modal';
-import CatsCoDownloadModal from '../widgets/catsco-download-modal';
-import DesktopConnectModal from '../widgets/desktop-connect-modal';
-import RelayAccessModal from '../widgets/relay-access-modal';
-import PasswordResetForm from '../widgets/password-reset-form';
-import GroupSettings from '../widgets/group-settings';
 import EditableConversationTitle from '../widgets/editable-conversation-title';
-import AuthFlowBackground from '../components/auth-flow-background';
 import { InlineFeedback, useFeedback } from '../components/feedback-system';
-import WorkflowRichMediaDemo from './workflow-rich-media-demo';
 import Avatar from '../widgets/avatar';
 import BotModelSelector, {
   describeModelApplyError,
@@ -65,9 +46,27 @@ import {
   verifyLiquidThemePassword,
 } from '../utils/theme-access';
 import { Cloud, Download, Frown, KeyRound, Laptop, Package, Settings, Settings2, LogOut, Eye, EyeOff, PanelLeftClose, PanelLeftOpen } from 'lucide-react';
-import '../css/openchat-theme.css';
-import '../css/catsco-ui-system.css';
-import '../css/catsco-liquid-green.css';
+
+const RelayAdminPanel = lazy(() => import('./relay-admin-panel'));
+const ChatListView = lazy(() => import('./sidepanel-view'));
+const FriendsView = lazy(() => import('./friends-view'));
+const MessagesView = lazy(() => import('./messages-view'));
+const SearchOverlay = lazy(() => import('./search-overlay'));
+const AgentEntryBindView = lazy(() => import('./agent-entry-bind-view'));
+const ChannelDeviceLinkView = lazy(() => import('./channel-device-link-view'));
+const MobileUploadView = lazy(() => import('./mobile-upload-view'));
+const SkillHubView = lazy(() => import('./skillhub-view'));
+const EmptyTaskComposer = lazy(() => import('../widgets/empty-task-composer'));
+const ProfileEditor = lazy(() => import('../widgets/profile-editor'));
+const FeedbackModal = lazy(() => import('../widgets/feedback-modal'));
+const CatsCoDownloadModal = lazy(() => import('../widgets/catsco-download-modal'));
+const DesktopConnectModal = lazy(() => import('../widgets/desktop-connect-modal'));
+const RelayAccessModal = lazy(() => import('../widgets/relay-access-modal'));
+const PasswordResetForm = lazy(() => import('../widgets/password-reset-form'));
+const GroupSettings = lazy(() => import('../widgets/group-settings'));
+const CloudArtifactsPanel = lazy(() => import('../widgets/cloud-artifacts-panel'));
+const AuthFlowBackground = lazy(() => import('../components/auth-flow-background'));
+const WorkflowRichMediaDemo = lazy(() => import('./workflow-rich-media-demo'));
 
 const TABS = {
   CHATS: 'chats'
@@ -92,6 +91,14 @@ const DEV_PREVIEW_USER = {
   avatar_url: '',
   account_type: 'human',
 };
+
+function WorkspaceLoading({ label = '正在加载工作区…' }) {
+  return (
+    <main className="cc-workspace-loading" role="status" aria-live="polite">
+      <span>{label}</span>
+    </main>
+  );
+}
 
 function normalizeUserProfile(raw) {
   if (!raw) return null;
@@ -166,13 +173,21 @@ function findConnectedLocalAgent(agents) {
 export default function TinodeWeb() {
   const mobileUploadMatch = window.location.pathname.match(/^\/mobile-upload\/([^/]+)$/);
   if (mobileUploadMatch) {
-    return <MobileUploadView sessionId={decodeURIComponent(mobileUploadMatch[1])} />;
+    return (
+      <Suspense fallback={<WorkspaceLoading label="正在加载上传入口…" />}>
+        <MobileUploadView sessionId={decodeURIComponent(mobileUploadMatch[1])} />
+      </Suspense>
+    );
   }
 
   const demoParams = new URLSearchParams(window.location.search);
   const showWorkflowDemo = demoParams.get('workflow_demo') === '1';
   if (showWorkflowDemo) {
-    return <WorkflowRichMediaDemo />;
+    return (
+      <Suspense fallback={<WorkspaceLoading label="正在加载演示…" />}>
+        <WorkflowRichMediaDemo />
+      </Suspense>
+    );
   }
 
   return <TinodeWebApp />;
@@ -185,6 +200,8 @@ function TinodeWebApp() {
   const channelDeviceLink = window.location.pathname === '/channel-device-link';
   const channelAccountLink = window.location.pathname === '/channel-account-link';
   const [user, setUser] = useState(() => getInitialUser());
+  const [workspaceStylesForUser, setWorkspaceStylesForUser] = useState('');
+  const workspaceStylesReady = !user?.uid || workspaceStylesForUser === String(user.uid);
   const [activeTab, setActiveTab] = useState(TABS.CHATS);
   const [activeView, setActiveView] = useState('chats');
   const [activeTopic, _setActiveTopic] = useState(() => (
@@ -195,6 +212,24 @@ function TinodeWebApp() {
   const [messageLocationRequest, setMessageLocationRequest] = useState(null);
   const messageLocationSequenceRef = useRef(0);
   const taskDraftSequenceRef = useRef(0);
+
+  useEffect(() => {
+    const userId = String(user?.uid || '');
+    if (!userId || workspaceStylesForUser === userId) return undefined;
+
+    let cancelled = false;
+    import('./workspace-styles')
+      .catch((error) => {
+        console.error('Failed to load workspace styles:', error);
+      })
+      .finally(() => {
+        if (!cancelled) setWorkspaceStylesForUser(userId);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [user?.uid, workspaceStylesForUser]);
 
   useEffect(() => {
     if (!user) return undefined;
@@ -236,6 +271,8 @@ function TinodeWebApp() {
     return () => { cancelled = true; };
   }, []);
   const [cloudArtifactsRequest, setCloudArtifactsRequest] = useState(null);
+  const [standaloneCloudArtifactsRequest, setStandaloneCloudArtifactsRequest] = useState(null);
+  const [standaloneCloudArtifactsTab, setStandaloneCloudArtifactsTab] = useState('active');
   const cloudArtifactsRequestSequenceRef = useRef(0);
   const [managedGroup, setManagedGroup] = useState(null);
   const appShellRef = useRef(null);
@@ -276,15 +313,29 @@ function TinodeWebApp() {
   }, [activeTopicId]);
   const displayedActiveAgent = resolveDisplayedActiveAgent(activeTopicId, activeAgentState, taskDraft);
   const showCloudArtifactsAction = canOpenCloudArtifacts(activeTopic, displayedActiveAgent);
+  const cloudArtifactsAgentUID = Number(displayedActiveAgent?.uid || displayedActiveAgent?.id || 0);
   const handleOpenCloudArtifacts = useCallback(() => {
-    const agentUid = Number(displayedActiveAgent?.uid || 0);
+    const agentUid = Number(displayedActiveAgent?.uid || displayedActiveAgent?.id || 0);
     if (agentUid <= 0) return;
     cloudArtifactsRequestSequenceRef.current += 1;
-    setCloudArtifactsRequest({
+    const request = {
       agentUid,
       requestId: cloudArtifactsRequestSequenceRef.current,
-    });
-  }, [displayedActiveAgent?.uid]);
+      topicId: activeTopicId,
+      initialTab: activeTopicId ? 'files' : 'active',
+    };
+    if (activeTopicId) {
+      setStandaloneCloudArtifactsRequest(null);
+      setCloudArtifactsRequest(request);
+      return;
+    }
+    setStandaloneCloudArtifactsTab('active');
+    setStandaloneCloudArtifactsRequest(request);
+  }, [activeTopicId, displayedActiveAgent?.id, displayedActiveAgent?.uid]);
+
+  useEffect(() => {
+    if (activeTopicId) setStandaloneCloudArtifactsRequest(null);
+  }, [activeTopicId]);
   const appSidebarMaxWidth = getSidebarMaxWidth(sidebarViewportWidth);
   const appSidebarWidth = clampSidebarWidth(
     appSidebarPreferredWidth,
@@ -883,6 +934,7 @@ function TinodeWebApp() {
     if (!agentUid) return;
     const projectId = Number(options?.projectId || 0);
     taskDraftSequenceRef.current += 1;
+    setStandaloneCloudArtifactsRequest(null);
     setActiveTopic(null);
     setActiveView('chats');
     setTaskDraft({
@@ -948,23 +1000,33 @@ function TinodeWebApp() {
     setMobileSidebarOpen(false);
   }, [setActiveTopic]);
 
-  if ((channelDeviceLink || channelAccountLink) && user) {
-    const params = new URLSearchParams(window.location.search);
-    return (
-      <ChannelDeviceLinkView
-        bindingId={params.get('binding_id') || ''}
-        linkToken={params.get('link_token') || ''}
-        user={user}
-      />
-    );
-  }
-
   if (!user) {
     return <AuthView mode={authMode} setMode={setAuthMode} onLogin={handleLogin} onRegister={handleRegister} />;
   }
 
+  if (!workspaceStylesReady) {
+    return <WorkspaceLoading />;
+  }
+
+  if (channelDeviceLink || channelAccountLink) {
+    const params = new URLSearchParams(window.location.search);
+    return (
+      <Suspense fallback={<WorkspaceLoading />}>
+        <ChannelDeviceLinkView
+          bindingId={params.get('binding_id') || ''}
+          linkToken={params.get('link_token') || ''}
+          user={user}
+        />
+      </Suspense>
+    );
+  }
+
   if (entrySceneKey) {
-    return <AgentEntryBindView sceneKey={entrySceneKey} />;
+    return (
+      <Suspense fallback={<WorkspaceLoading />}>
+        <AgentEntryBindView sceneKey={entrySceneKey} />
+      </Suspense>
+    );
   }
 
   const localAssistantBar = (
@@ -973,20 +1035,24 @@ function TinodeWebApp() {
       activeAgent={displayedActiveAgent}
       currentModelName={currentModelName}
       onDownload={() => setShowDownloadModal(true)}
-      onOpenCloudArtifacts={showCloudArtifactsAction ? handleOpenCloudArtifacts : undefined}
+      onOpenCloudArtifacts={showCloudArtifactsAction && cloudArtifactsAgentUID > 0
+        ? handleOpenCloudArtifacts
+        : undefined}
       title={activeTopic?.name || taskDraftTitle(taskDraft)}
       onRenameTitle={activeTopic ? handleRenameActiveTopic : undefined}
       relayAdminAllowed={relayAdminAllowed}
       onOpenRelayAdmin={() => setRelayAdminOpen(true)}
     />
   );
+  const shouldRenderSidebarContent = sidebarViewportWidth > 768 || mobileSidebarOpen;
 
   return (
-    <div
-      ref={appShellRef}
-      className={`v3-app${isSidebarResizing ? ' sidebar-resizing' : ''}`}
-      style={{ '--cc-sidebar-user-width': `${appSidebarWidth}px` }}
-    >
+    <Suspense fallback={<WorkspaceLoading />}>
+      <div
+        ref={appShellRef}
+        className={`v3-app${isSidebarResizing ? ' sidebar-resizing' : ''}`}
+        style={{ '--cc-sidebar-user-width': `${appSidebarWidth}px` }}
+      >
       {mobileSidebarOpen && (
         <button
           type="button"
@@ -1035,25 +1101,29 @@ function TinodeWebApp() {
             <Package size={17} />
             <span>SkillHub</span>
           </button>
-          <SidebarContent
-            activeTopic={activeTopic ? activeTopic.topicId : null}
-            onSelectTopic={(topic) => {
-              setTaskDraft(null);
-              setMessageLocationRequest(null);
-              setActiveView('chats');
-              setActiveTopic(topic);
-              setMobileSidebarOpen(false);
-            }}
-            onOpenSearch={() => setSearchOpen(true)}
-            onStartAgentTask={handleStartAgentTask}
-            user={user}
-            onlineUsers={onlineUsers}
-            compact={appSidebarCollapsed}
-            onManageGroup={(group) => {
-              setManagedGroup(group);
-              setMobileSidebarOpen(false);
-            }}
-          />
+          {shouldRenderSidebarContent && (
+            <Suspense fallback={<span className="oc-visually-hidden" role="status">正在加载侧栏…</span>}>
+              <SidebarContent
+                activeTopic={activeTopic ? activeTopic.topicId : null}
+                onSelectTopic={(topic) => {
+                  setTaskDraft(null);
+                  setMessageLocationRequest(null);
+                  setActiveView('chats');
+                  setActiveTopic(topic);
+                  setMobileSidebarOpen(false);
+                }}
+                onOpenSearch={() => setSearchOpen(true)}
+                onStartAgentTask={handleStartAgentTask}
+                user={user}
+                onlineUsers={onlineUsers}
+                compact={appSidebarCollapsed}
+                onManageGroup={(group) => {
+                  setManagedGroup(group);
+                  setMobileSidebarOpen(false);
+                }}
+              />
+            </Suspense>
+          )}
         </div>
         
         <ProfileFooter
@@ -1140,13 +1210,31 @@ function TinodeWebApp() {
             ) : (
               <>
                 {localAssistantBar}
-                <NoActiveTask
-                  key={taskDraft?.key || 'new-task'}
-                  user={user}
-                  initialAgent={taskDraft?.agent}
-                  onResolveAgentTopic={createDraftAgentTaskTopic}
-                  onActivateTopic={activateResolvedTopic}
-                />
+                <div className={`v3-message-workspace${standaloneCloudArtifactsRequest ? ' has-preview' : ''}`}>
+                  <NoActiveTask
+                    key={taskDraft?.key || 'new-task'}
+                    user={user}
+                    initialAgent={taskDraft?.agent}
+                    onResolveAgentTopic={createDraftAgentTaskTopic}
+                    onActivateTopic={activateResolvedTopic}
+                  />
+                  {standaloneCloudArtifactsRequest && (
+                    <div className="v3-file-preview-shell">
+                      <Suspense fallback={null}>
+                        <CloudArtifactsPanel
+                          key={standaloneCloudArtifactsRequest.requestId}
+                          agentUid={standaloneCloudArtifactsRequest.agentUid}
+                          topicId={standaloneCloudArtifactsRequest.topicId}
+                          tab={standaloneCloudArtifactsTab}
+                          onTabChange={setStandaloneCloudArtifactsTab}
+                          onClose={() => setStandaloneCloudArtifactsRequest(null)}
+                          onPreviewArtifact={openExternalArtifact}
+                          onPreviewFile={openExternalArtifact}
+                        />
+                      </Suspense>
+                    </div>
+                  )}
+                </div>
               </>
             )}
           </div>
@@ -1217,7 +1305,8 @@ function TinodeWebApp() {
         />
       )}
 
-    </div>
+      </div>
+    </Suspense>
   );
 }
 
@@ -1238,11 +1327,16 @@ export function LocalAssistantBar({ agentModelState, activeAgent, currentModelNa
             <Settings2 size={17} />
           </button>
         )}
-        {onOpenCloudArtifacts && (
-          <button type="button" className="v3-action-btn" onClick={onOpenCloudArtifacts} aria-label="打开产物" title="产物">
-            <Cloud size={17} />
-          </button>
-        )}
+        <button
+          type="button"
+          className="v3-action-btn v3-cloud-action"
+          onClick={onOpenCloudArtifacts}
+          disabled={!onOpenCloudArtifacts}
+          aria-label={onOpenCloudArtifacts ? '打开产物' : '产物暂不可用'}
+          title={onOpenCloudArtifacts ? '产物' : '选择 Agent 后可查看产物'}
+        >
+          <Cloud size={17} aria-hidden="true" />
+        </button>
         <button type="button" className="v3-action-btn" onClick={onDownload} aria-label="下载桌面端">
           <Download size={17} />
         </button>
@@ -1254,7 +1348,8 @@ export function LocalAssistantBar({ agentModelState, activeAgent, currentModelNa
 export { canOpenCloudArtifacts, describeModelApplyError, describeModelConfigRequestError, resolveDisplayedActiveAgent };
 
 function canOpenCloudArtifacts(activeTopic, activeAgent) {
-  return Boolean(activeAgent?.cloud_artifacts_enabled && activeTopic?.topicId);
+  const agentUID = Number(activeAgent?.uid || activeAgent?.id || 0);
+  return agentUID > 0;
 }
 
 function resolveDisplayedActiveAgent(activeTopicId, activeAgentState, taskDraft) {
@@ -1439,7 +1534,9 @@ function AuthView({ mode, setMode, onLogin, onRegister }) {
 
   const authShell = (content) => (
     <div className="oc-auth">
-      <AuthFlowBackground />
+      <Suspense fallback={null}>
+        <AuthFlowBackground />
+      </Suspense>
       {content}
     </div>
   );
@@ -1451,7 +1548,9 @@ function AuthView({ mode, setMode, onLogin, onRegister }) {
         <div className="oc-settings-secondary" style={{ marginBottom: 14 }}>
           输入注册邮箱，验证后设置新密码。
         </div>
-        <PasswordResetForm />
+        <Suspense fallback={<div className="oc-settings-secondary" role="status">正在加载重置表单…</div>}>
+          <PasswordResetForm />
+        </Suspense>
         <div className="oc-auth-link">
           <span>想起密码了？<a href="#" onClick={(e) => { e.preventDefault(); setMode('login'); }}>返回登录</a></span>
         </div>
@@ -1572,6 +1671,12 @@ function taskDraftTitle(taskDraft) {
   const projectName = String(taskDraft?.projectName || '').trim();
   if (agentName && projectName) return `新任务 · ${agentName} · ${projectName}`;
   return agentName ? `新任务 · ${agentName}` : '新任务';
+}
+
+function openExternalArtifact(resource) {
+  const url = String(resource?.url || '').trim();
+  if (!url) return;
+  window.open(url, '_blank', 'noopener,noreferrer');
 }
 
 function buildAgentTaskName(agent, draft = {}) {

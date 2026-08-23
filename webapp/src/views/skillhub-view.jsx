@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Bot, Check, Clipboard, FolderOpen, Link2, Package, RefreshCw, Search, Share2, Trash2 } from 'lucide-react';
 import { api, requestSkillHubDeviceTool } from '../api';
+import { useFeedback } from '../components/feedback-system';
+import SkillHubContent from './skillhub-content';
 import '../css/skillhub-view.css';
 
 const SKILLHUB_DEVICE_TOOLS = {
@@ -18,7 +19,64 @@ const SKILLHUB_DEVICE_SCHEMAS = {
   [SKILLHUB_DEVICE_TOOLS.switchBot]: 'xiaoba.skillhub.bot_switch.v1',
 };
 
+const SKILLHUB_SELECTED_BOT_STORAGE_PREFIX = 'catsco.skillhub.selectedBot';
+const SKILLHUB_SWITCH_RETRY_ATTEMPTS = 40;
+const SKILLHUB_SWITCH_TIMEOUT_MS = 60_000;
+const SKILLHUB_SWITCH_INITIAL_DELAY_MS = 2_000;
+const SKILLHUB_SWITCH_RETRY_DELAY_MS = 1_500;
+const SKILLHUB_DEVICE_LIST_TIMEOUT_MS = 5_000;
+const SKILLHUB_WORKSPACE_TIMEOUT_MS = 8_000;
+const RETRYABLE_SKILLHUB_SWITCH_ERRORS = new Set([
+  'BOT_NOT_ACTIVE',
+  'REQUEST_EXPIRED',
+  'SHUTTING_DOWN',
+  'device_rpc_timeout',
+  'skillhub_device_timeout',
+  'skillhub_websocket_disconnected',
+  'skillhub_websocket_unavailable',
+  'target_device_unavailable',
+]);
+const RETRYABLE_SKILLHUB_DEVICE_LIST_ERRORS = new Set([
+  'NETWORK_ERROR',
+  'REQUEST_TIMEOUT',
+]);
+const RETRYABLE_SKILLHUB_DEVICE_LIST_STATUSES = new Set([500, 502, 503, 504]);
+
 const wait = (delayMs) => new Promise((resolve) => setTimeout(resolve, delayMs));
+
+function runWithTimeout(operation, timeoutMs, createTimeoutError) {
+  let result;
+  try {
+    result = operation();
+  } catch (error) {
+    return Promise.reject(error);
+  }
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(createTimeoutError()), timeoutMs);
+    Promise.resolve(result).then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (error) => {
+        clearTimeout(timer);
+        reject(error);
+      },
+    );
+  });
+}
+
+function skillHubDeviceListTimeoutError() {
+  const error = new Error('请求设备列表超时，请稍后重试');
+  error.code = 'REQUEST_TIMEOUT';
+  return error;
+}
+
+function skillHubWorkspaceTimeoutError() {
+  const error = new Error('等待本地 XiaoBa 响应超时，请确认设备在线并已更新到最新版本。');
+  error.code = 'skillhub_device_timeout';
+  return error;
+}
 
 export function normalizeSkillHubDevices(response) {
   const devices = Array.isArray(response) ? response : (response?.devices || []);
@@ -39,6 +97,121 @@ export function normalizeOwnedBots(response, userUid) {
     const ownerUID = Number(bot?.owner_id || bot?.owner_uid || 0);
     return ownerUID > 0 && ownerUID === Number(userUid);
   });
+}
+
+function selectedBotStorageKey(userUid) {
+  const uid = String(userUid || '').trim();
+  return uid ? `${SKILLHUB_SELECTED_BOT_STORAGE_PREFIX}.${uid}` : '';
+}
+
+function browserStorage() {
+  try {
+    return globalThis.localStorage;
+  } catch {
+    return null;
+  }
+}
+
+export function readRememberedSkillHubBotUID(userUid, storage = browserStorage()) {
+  const key = selectedBotStorageKey(userUid);
+  if (!key || !storage) return '';
+  try {
+    return String(storage.getItem(key) || '').trim();
+  } catch {
+    return '';
+  }
+}
+
+export function rememberSkillHubBotUID(userUid, botUid, storage = browserStorage()) {
+  const key = selectedBotStorageKey(userUid);
+  const uid = String(botUid || '').trim();
+  if (!key || !storage) return;
+  try {
+    if (uid) storage.setItem(key, uid);
+    else storage.removeItem(key);
+  } catch {
+    // Storage can be unavailable in hardened or private browser contexts.
+  }
+}
+
+export function resolvePreferredSkillHubBotUID(bots, userUid, storage = browserStorage()) {
+  const remembered = readRememberedSkillHubBotUID(userUid, storage);
+  if (remembered && bots.some((bot) => String(botUID(bot)) === remembered)) return remembered;
+  const firstUID = botUID(bots[0]);
+  return firstUID ? String(firstUID) : '';
+}
+
+export function isRetryableSkillHubSwitchError(error) {
+  if (RETRYABLE_SKILLHUB_SWITCH_ERRORS.has(String(error?.code || ''))) return true;
+  return error?.code === 'skillhub_device_request_rejected'
+    && [404, 409, 503].includes(Number(error?.status || 0));
+}
+
+export function isRetryableSkillHubDeviceListError(error) {
+  const status = Number(error?.status || 0);
+  if (status > 0) return RETRYABLE_SKILLHUB_DEVICE_LIST_STATUSES.has(status);
+  return RETRYABLE_SKILLHUB_DEVICE_LIST_ERRORS.has(String(error?.code || ''));
+}
+
+export async function waitForSkillHubWorkspaceAfterSwitch({
+  deviceId,
+  readWorkspace,
+  getDevices = api.getDevices,
+  isCurrent = () => true,
+  waitFor = wait,
+  maxAttempts = SKILLHUB_SWITCH_RETRY_ATTEMPTS,
+  timeoutMs = SKILLHUB_SWITCH_TIMEOUT_MS,
+  initialDelayMs = SKILLHUB_SWITCH_INITIAL_DELAY_MS,
+  retryDelayMs = SKILLHUB_SWITCH_RETRY_DELAY_MS,
+  deviceListTimeoutMs = SKILLHUB_DEVICE_LIST_TIMEOUT_MS,
+  workspaceTimeoutMs = SKILLHUB_WORKSPACE_TIMEOUT_MS,
+  now = () => Date.now(),
+}) {
+  const deadline = now() + Math.max(1, Number(timeoutMs) || SKILLHUB_SWITCH_TIMEOUT_MS);
+  const remainingMs = () => Math.max(0, deadline - now());
+  let lastError;
+  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+    const delayMs = Math.min(
+      attempt === 0 ? initialDelayMs : retryDelayMs,
+      remainingMs(),
+    );
+    if (delayMs <= 0) break;
+    await waitFor(delayMs);
+    if (!isCurrent()) return null;
+    if (remainingMs() <= 0) break;
+
+    try {
+      const requestTimeoutMs = Math.min(deviceListTimeoutMs, remainingMs());
+      const capable = normalizeSkillHubDevices(await runWithTimeout(
+        () => getDevices({ timeoutMs: requestTimeoutMs }),
+        requestTimeoutMs,
+        skillHubDeviceListTimeoutError,
+      ));
+      const routeReady = capable.some((device) => String(device.deviceId || '') === String(deviceId || ''));
+      if (!routeReady) continue;
+    } catch (error) {
+      if (!isRetryableSkillHubDeviceListError(error)) throw error;
+      lastError = error;
+      continue;
+    }
+
+    try {
+      const requestTimeoutMs = Math.min(workspaceTimeoutMs, remainingMs());
+      return await runWithTimeout(
+        () => readWorkspace(requestTimeoutMs),
+        requestTimeoutMs,
+        skillHubWorkspaceTimeoutError,
+      );
+    } catch (error) {
+      if (!isRetryableSkillHubSwitchError(error)) throw error;
+      lastError = error;
+    }
+  }
+  if (!isCurrent()) return null;
+  const error = new Error('本地 XiaoBa 切换超时，请确认 XiaoBa 仍在运行后重试。');
+  error.code = 'skillhub_device_switch_timeout';
+  error.cause = lastError;
+  throw error;
 }
 
 export function normalizeSkillHubSkills(response) {
@@ -71,6 +244,16 @@ export function normalizeLocalSkills(response) {
   })).filter((skill) => skill.name);
 }
 
+export function normalizeServerAgentSkills(response) {
+  const values = Array.isArray(response) ? response : (response?.skills || []);
+  return values.map((skill) => ({
+    ...skill,
+    source: String(skill?.source || 'skillhub').trim(),
+    skillId: String(skill?.skillId || skill?.skill_id || skill?.id || '').trim(),
+    version: String(skill?.version || '').trim(),
+  })).filter((skill) => skill.skillId);
+}
+
 export function isPrivateSkillHubReference(skillId) {
   const value = String(skillId || '');
   return value.startsWith('priv_') || value.startsWith('private/');
@@ -90,6 +273,26 @@ export function isLocalSkillShared(skill, installedReference) {
     )
   );
   return skill?.canShare === false && hasPublishedIdentity;
+}
+
+export function resolveAddedSkillPresentation(skill, catalogueByID, localSkillsByReference) {
+  const skillId = String(skill?.skillId || '').trim();
+  const details = catalogueByID?.get(skillId);
+  const candidate = localSkillsByReference?.get(skillId);
+  const candidateReference = candidate?.skillHub?.reference;
+  const localDetails = candidate
+    && (!skill?.version || candidateReference?.version === skill.version)
+    && (!skill?.contentHash || candidateReference?.contentHash === skill.contentHash)
+    ? candidate
+    : null;
+  const privateReference = isPrivateSkillHubReference(skillId);
+  return {
+    details,
+    localDetails,
+    privateReference,
+    label: details?.displayName || localDetails?.name || (privateReference ? '私有能力' : skillId),
+    description: details?.description || localDetails?.description || '此能力已添加到当前 Agent，可立即使用。',
+  };
 }
 
 export function upsertSkillRef(skills, nextRef, replacedSkillId = '') {
@@ -250,14 +453,38 @@ export function assertSkillHubDeviceResult(result, { toolName, botUID, reference
 }
 
 function botLabel(bot) {
-  return bot?.display_name || bot?.displayName || bot?.username || `Bot ${bot?.uid}`;
+  return bot?.display_name || bot?.displayName || bot?.username || `Agent ${bot?.uid}`;
 }
 
 function isExactHash(value) {
   return /^[0-9a-f]{64}$/.test(String(value || ''));
 }
 
+async function copyText(value) {
+  if (typeof navigator.clipboard?.writeText === 'function') {
+    await navigator.clipboard.writeText(value);
+    return;
+  }
+  if (typeof document === 'undefined' || typeof document.execCommand !== 'function') {
+    throw new Error('当前浏览器无法自动复制。');
+  }
+  const textarea = document.createElement('textarea');
+  textarea.value = value;
+  textarea.setAttribute('readonly', '');
+  textarea.setAttribute('aria-hidden', 'true');
+  textarea.style.position = 'fixed';
+  textarea.style.opacity = '0';
+  document.body.appendChild(textarea);
+  textarea.select();
+  try {
+    if (!document.execCommand('copy')) throw new Error('当前浏览器无法自动复制。');
+  } finally {
+    textarea.remove();
+  }
+}
+
 export default function SkillHubView({ user }) {
+  const feedback = useFeedback();
   const [bots, setBots] = useState([]);
   const [selectedBotUID, setSelectedBotUID] = useState('');
   const [definition, setDefinition] = useState({ skills: [], revision: 0 });
@@ -269,6 +496,10 @@ export default function SkillHubView({ user }) {
   const [loadingCatalogue, setLoadingCatalogue] = useState(true);
   const [catalogueError, setCatalogueError] = useState('');
   const [definitionError, setDefinitionError] = useState('');
+  const [serverSkills, setServerSkills] = useState([]);
+  const [serverSkillsVisibility, setServerSkillsVisibility] = useState('');
+  const [serverSkillsError, setServerSkillsError] = useState('');
+  const [loadingServerSkills, setLoadingServerSkills] = useState(false);
   const [localSkills, setLocalSkills] = useState([]);
   const [localSkillsPath, setLocalSkillsPath] = useState('');
   const [localSkillsError, setLocalSkillsError] = useState('');
@@ -276,6 +507,9 @@ export default function SkillHubView({ user }) {
   const [loadingLocalSkills, setLoadingLocalSkills] = useState(false);
   const [sharingSkill, setSharingSkill] = useState('');
   const [saving, setSaving] = useState(false);
+  const [activeSection, setActiveSection] = useState('added');
+  const [skillAction, setSkillAction] = useState(null);
+  const [actionNotice, setActionNotice] = useState('');
   const [devices, setDevices] = useState([]);
   const [selectedDeviceID, setSelectedDeviceID] = useState('');
   const [loadingDevices, setLoadingDevices] = useState(true);
@@ -283,16 +517,27 @@ export default function SkillHubView({ user }) {
   const selectedDeviceIDRef = useRef('');
   const definitionBotUIDRef = useRef('');
   const definitionRequestRef = useRef(0);
+  const serverSkillsRequestRef = useRef(0);
   const catalogueRequestRef = useRef(0);
   const localRequestRef = useRef(0);
   const saveRequestRef = useRef(0);
+  const requestedBotSwitchRef = useRef('');
 
   useEffect(() => {
     selectedBotUIDRef.current = selectedBotUID;
     saveRequestRef.current += 1;
     setSaving(false);
+    setSkillAction(null);
+    setActionNotice('');
     setDefinitionError('');
+    setServerSkillsError('');
   }, [selectedBotUID]);
+
+  useEffect(() => {
+    if (!actionNotice) return undefined;
+    const timer = window.setTimeout(() => setActionNotice(''), 3000);
+    return () => window.clearTimeout(timer);
+  }, [actionNotice]);
 
   const definitionReady = Boolean(
     selectedBotUID
@@ -304,6 +549,34 @@ export default function SkillHubView({ user }) {
     (definition.skills || []).map((skill) => [skill.skillId, skill]),
   ), [definition.skills]);
 
+  const localSkillsByReference = useMemo(() => {
+    const result = new Map();
+    for (const skill of localSkills) {
+      const skillId = String(skill?.skillHub?.reference?.skillId || '').trim();
+      if (skillId) result.set(skillId, skill);
+    }
+    return result;
+  }, [localSkills]);
+
+  const catalogueByID = useMemo(() => new Map(
+    catalogue.map((skill) => [skill.skillId, skill]),
+  ), [catalogue]);
+
+  const addedSkillPresentationByID = useMemo(() => new Map(
+    (definition.skills || []).map((skill) => [
+      skill.skillId,
+      resolveAddedSkillPresentation(skill, catalogueByID, localSkillsByReference),
+    ]),
+  ), [catalogueByID, definition.skills, localSkillsByReference]);
+
+  const selectedAgent = useMemo(() => (
+    bots.find((bot) => String(botUID(bot)) === selectedBotUID) || null
+  ), [bots, selectedBotUID]);
+
+  const agentOptions = useMemo(() => bots.map((bot) => ({
+    value: String(botUID(bot)),
+    label: botLabel(bot),
+  })), [bots]);
   const loadDevices = useCallback(async () => {
     setLoadingDevices(true);
     try {
@@ -337,8 +610,7 @@ export default function SkillHubView({ user }) {
       setBots(owned);
       setSelectedBotUID((current) => {
         if (current && owned.some((bot) => String(botUID(bot)) === current)) return current;
-        const firstUID = botUID(owned[0]);
-        return firstUID ? String(firstUID) : '';
+        return resolvePreferredSkillHubBotUID(owned, user?.uid);
       });
     } finally {
       setLoadingBots(false);
@@ -383,13 +655,56 @@ export default function SkillHubView({ user }) {
         requestID !== definitionRequestRef.current
         || requestedBotUID !== selectedBotUIDRef.current
       ) return null;
-      setDefinitionError(error?.message || '无法读取当前 Bot 的 Skills 配置');
+      setDefinitionError(error?.message || '无法读取当前 Agent 的能力配置');
       return null;
     } finally {
       if (
         requestID === definitionRequestRef.current
         && requestedBotUID === selectedBotUIDRef.current
       ) setLoadingDefinition(false);
+    }
+  }, []);
+
+  const loadServerSkills = useCallback(async (botUID = selectedBotUIDRef.current) => {
+    const requestedBotUID = String(botUID || '');
+    const requestID = serverSkillsRequestRef.current + 1;
+    serverSkillsRequestRef.current = requestID;
+    if (!requestedBotUID) {
+      setServerSkills([]);
+      setServerSkillsVisibility('');
+      setServerSkillsError('');
+      setLoadingServerSkills(false);
+      return null;
+    }
+    setServerSkills([]);
+    setServerSkillsVisibility('');
+    setServerSkillsError('');
+    setLoadingServerSkills(true);
+    try {
+      const response = await api.getAgentSkills(requestedBotUID);
+      if (
+        requestID !== serverSkillsRequestRef.current
+        || requestedBotUID !== selectedBotUIDRef.current
+      ) return null;
+      setServerSkills(normalizeServerAgentSkills(response));
+      setServerSkillsVisibility(String(response?.skills_visibility || response?.skillsVisibility || '').trim());
+      return response;
+    } catch (error) {
+      if (
+        requestID !== serverSkillsRequestRef.current
+        || requestedBotUID !== selectedBotUIDRef.current
+      ) return null;
+      setServerSkills([]);
+      setServerSkillsVisibility('');
+      setServerSkillsError(error?.status === 403
+        ? '服务器 Agent 未公开 Skills 列表，当前账号没有查看权限。'
+        : (error?.message || '无法读取服务器 Agent 的 Skills 配置。'));
+      return null;
+    } finally {
+      if (
+        requestID === serverSkillsRequestRef.current
+        && requestedBotUID === selectedBotUIDRef.current
+      ) setLoadingServerSkills(false);
     }
   }, []);
 
@@ -411,7 +726,11 @@ export default function SkillHubView({ user }) {
     }
   }, []);
 
-  const loadLocalWorkspace = useCallback(async (botUID = selectedBotUIDRef.current, deviceID = selectedDeviceID) => {
+  const loadLocalWorkspace = useCallback(async (
+    botUID = selectedBotUIDRef.current,
+    deviceID = selectedDeviceID,
+    options = {},
+  ) => {
     const requestedBotUID = String(botUID || '');
     const requestedDeviceID = String(deviceID || '');
     const requestID = localRequestRef.current + 1;
@@ -423,6 +742,9 @@ export default function SkillHubView({ user }) {
       setLoadingLocalSkills(false);
       return;
     }
+    const allowBotSwitch = options.allowBotSwitch === true
+      || requestedBotSwitchRef.current === requestedBotUID;
+    if (requestedBotSwitchRef.current === requestedBotUID) requestedBotSwitchRef.current = '';
     setLoadingLocalSkills(true);
     // Do not leave the previous Bot's cards actionable while XiaoBa switches
     // its active workspace. The local bridge reads the currently active
@@ -453,21 +775,19 @@ export default function SkillHubView({ user }) {
       } catch (error) {
         if (error?.code !== 'BOT_NOT_ACTIVE') throw error;
         if (!isCurrentRequest()) return;
+        if (!allowBotSwitch) {
+          setLocalNotice('当前 Bot 尚未在本地 XiaoBa 激活。');
+          return;
+        }
         await invoke(SKILLHUB_DEVICE_TOOLS.switchBot, {}, 10_000);
         if (!isCurrentRequest()) return;
         setLocalNotice('正在切换本地 Bot，等待 XiaoBa 重新连接…');
-        let lastError = error;
-        for (let attempt = 0; attempt < 12; attempt += 1) {
-          await wait(attempt === 0 ? 2_000 : 1_500);
-          if (!isCurrentRequest()) return;
-          try {
-            workspace = await invoke(SKILLHUB_DEVICE_TOOLS.workspace, {}, 8_000);
-            break;
-          } catch (retryError) {
-            lastError = retryError;
-          }
-        }
-        if (!workspace) throw lastError;
+        workspace = await waitForSkillHubWorkspaceAfterSwitch({
+          deviceId: requestedDeviceID,
+          readWorkspace: (timeoutMs) => invoke(SKILLHUB_DEVICE_TOOLS.workspace, {}, timeoutMs),
+          isCurrent: isCurrentRequest,
+        });
+        if (!workspace) return;
       }
       if (!isCurrentRequest()) return;
       if (String(workspace?.bot_uid || '') !== requestedBotUID) {
@@ -487,15 +807,16 @@ export default function SkillHubView({ user }) {
   }, [selectedDeviceID, user?.uid]);
 
   useEffect(() => {
-    loadBots().catch((error) => setDefinitionError(error?.message || '无法读取 Bot 列表'));
+    loadBots().catch((error) => setDefinitionError(error?.message || '无法读取 Agent 列表'));
     searchCatalogue('').catch(() => {});
     loadDevices().catch(() => {});
   }, [loadBots, loadDevices, searchCatalogue]);
 
   useEffect(() => {
     loadDefinition(selectedBotUID).catch(() => {});
+    loadServerSkills(selectedBotUID).catch(() => {});
     loadLocalWorkspace(selectedBotUID, selectedDeviceID).catch(() => {});
-  }, [loadDefinition, loadLocalWorkspace, selectedBotUID, selectedDeviceID]);
+  }, [loadDefinition, loadLocalWorkspace, loadServerSkills, selectedBotUID, selectedDeviceID]);
 
   const saveSkills = async (skills, expected = {}) => {
     const requestedBotUID = expected.botUID || selectedBotUIDRef.current;
@@ -562,45 +883,103 @@ export default function SkillHubView({ user }) {
     ) return;
     const initiatingRevision = definition.revision;
     const initiatingSkills = definition.skills;
+    const agentName = botLabel(selectedAgent);
+    setSkillAction({ type: 'add', skillId: skill.skillId });
+    setActionNotice('');
     let resolved = skill;
-    if (!resolved.latestVersion || !isExactHash(resolved.contentHash)) {
-      try {
+    try {
+      if (!resolved.latestVersion || !isExactHash(resolved.contentHash)) {
         const detail = await api.getSkillHubSkill(skill.skillId);
         if (
           initiatingBotUID !== selectedBotUIDRef.current
           || definitionBotUID !== initiatingBotUID
         ) return;
         resolved = resolveSkillHubEntry(skill, detail);
-      } catch (error) {
-        if (
-          initiatingBotUID === selectedBotUIDRef.current
-          && definitionBotUID === initiatingBotUID
-        ) setDefinitionError(error?.message || '无法读取 Skill 版本信息');
+      }
+      if (
+        initiatingBotUID !== selectedBotUIDRef.current
+        || definitionBotUID !== initiatingBotUID
+      ) return;
+      if (!resolved.latestVersion || !isExactHash(resolved.contentHash)) {
+        setDefinitionError('暂时无法取得推荐稳定版本，请稍后重试。');
         return;
       }
+      const nextRef = {
+        source: 'skillhub',
+        skillId: resolved.skillId,
+        version: resolved.latestVersion,
+        contentHash: resolved.contentHash,
+      };
+      const saved = await saveSkills(upsertSkillRef(initiatingSkills, nextRef), {
+        botUID: initiatingBotUID,
+        revision: initiatingRevision,
+      });
+      if (saved?.ok && initiatingBotUID === selectedBotUIDRef.current) {
+        setActionNotice(`已为 Agent“${agentName}”添加 ${resolved.displayName || resolved.skillId}。`);
+      }
+    } catch (error) {
+      if (
+        initiatingBotUID === selectedBotUIDRef.current
+        && definitionBotUID === initiatingBotUID
+      ) setDefinitionError(error?.message || '添加失败，未更改 Agent 当前配置。');
+    } finally {
+      if (initiatingBotUID === selectedBotUIDRef.current) setSkillAction(null);
     }
-    if (
-      initiatingBotUID !== selectedBotUIDRef.current
-      || definitionBotUID !== initiatingBotUID
-    ) return;
-    if (!resolved.latestVersion || !isExactHash(resolved.contentHash)) {
-      setDefinitionError('SkillHub 没有返回可绑定版本的完整哈希，无法安全关联到 Bot。');
-      return;
-    }
-    const nextRef = {
-      source: 'skillhub',
-      skillId: resolved.skillId,
-      version: resolved.latestVersion,
-      contentHash: resolved.contentHash,
-    };
-    await saveSkills(upsertSkillRef(initiatingSkills, nextRef), {
-      botUID: initiatingBotUID,
-      revision: initiatingRevision,
-    });
   };
 
   const removeSkill = async (skillID) => {
-    await saveSkills(definition.skills.filter((skill) => skill.skillId !== skillID));
+    if (!skillID || !definitionReady || saving || sharingSkill || skillAction) return;
+    const requestedBotUID = selectedBotUIDRef.current;
+    const agentName = botLabel(selectedAgent);
+    const skillName = addedSkillPresentationByID.get(skillID)?.label || skillID;
+    const confirmed = await feedback.confirm({
+      title: `从“${agentName}”移除“${skillName}”？`,
+      message: '该 Agent 将无法继续调用此能力。技能本身不会从 SkillHub 删除。',
+      confirmLabel: '从 Agent 移除',
+      tone: 'danger',
+    });
+    if (!confirmed || requestedBotUID !== selectedBotUIDRef.current) return;
+    setSkillAction({ type: 'remove', skillId: skillID });
+    setActionNotice('');
+    try {
+      const saved = await saveSkills(definition.skills.filter((skill) => skill.skillId !== skillID));
+      if (saved?.ok && requestedBotUID === selectedBotUIDRef.current) {
+        setActionNotice(`已从 Agent“${agentName}”移除 ${skillName}，不会影响其他 Agent。`);
+      }
+    } finally {
+      if (requestedBotUID === selectedBotUIDRef.current) setSkillAction(null);
+    }
+  };
+
+  const copySkill = async (skillID) => {
+    if (!skillID || !definitionReady || saving || sharingSkill || skillAction) return;
+    const requestedBotUID = selectedBotUIDRef.current;
+    const presentation = addedSkillPresentationByID.get(skillID);
+    const details = presentation?.details || catalogueByID.get(skillID);
+    const skillName = presentation?.label || skillID;
+    const privateReference = presentation?.privateReference ?? isPrivateSkillHubReference(skillID);
+    const manualCopyHint = privateReference ? '私有能力引用' : 'SkillHub ID';
+    const shareURL = String(details?.shareUrl || details?.share_url || details?.url || '').trim();
+    const copiedValue = shareURL || skillID;
+    setSkillAction({ type: 'copy', skillId: skillID });
+    setActionNotice('');
+    setDefinitionError('');
+    try {
+      await copyText(copiedValue);
+      if (requestedBotUID === selectedBotUIDRef.current) {
+        setActionNotice(shareURL
+          ? `已复制 ${skillName} 的链接。`
+          : privateReference
+            ? `已复制 ${skillName} 的私有能力引用。`
+            : `已复制 ${skillName} 的 SkillHub ID。`);
+      }
+    } catch (error) {
+      if (requestedBotUID === selectedBotUIDRef.current) {
+        setDefinitionError(`${error?.message || '复制失败'} 请手动复制 ${manualCopyHint}：${skillID}`);
+      }
+    } finally {
+      if (requestedBotUID === selectedBotUIDRef.current) setSkillAction(null);
+    }
   };
 
   const shareLocalSkill = async (localSkill) => {
@@ -670,7 +1049,7 @@ export default function SkillHubView({ user }) {
         revision: requestedRevision,
       });
       if (!saved?.ok) {
-        throw new Error('Skill 已分享到全局 SkillHub，但绑定当前 Bot 失败，请刷新 Bot 配置后重试。');
+        throw new Error('能力已发布到团队，但添加到当前 Agent 失败，请刷新 Agent 能力后重试。');
       }
       bound = true;
       try {
@@ -708,7 +1087,7 @@ export default function SkillHubView({ user }) {
         loadLocalWorkspace(requestedBotUID, requestedDeviceID),
       ]);
       if (requestedBotUID !== selectedBotUIDRef.current) return;
-      setLocalNotice(`“${localSkill.name}”已分享到全局 SkillHub，并绑定到当前 Bot。`);
+      setLocalNotice(`“${localSkill.name}”已发布到团队，并添加到当前 Agent。`);
     } catch (error) {
       if (requestedBotUID === selectedBotUIDRef.current) {
         if (bound) {
@@ -716,10 +1095,10 @@ export default function SkillHubView({ user }) {
           return;
         }
         if (uploaded) {
-          setLocalSkillsError('Skill 已进入全局 SkillHub，但暂未绑定到当前 Bot，请刷新后重试绑定。');
+          setLocalSkillsError('能力已发布到团队，但暂未添加到当前 Agent，请刷新后重试。');
           return;
         }
-        setLocalSkillsError(error?.message || '分享本地 Skill 失败');
+        setLocalSkillsError(error?.message || '发布自定义能力失败');
       }
     } finally {
       if (requestedBotUID === selectedBotUIDRef.current) setSharingSkill('');
@@ -736,266 +1115,68 @@ export default function SkillHubView({ user }) {
     }
   };
 
-  return (
-    <main className="cc-skillhub-page">
-      <header className="cc-skillhub-header">
-        <div className="cc-skillhub-heading-copy">
-          <h1>SkillHub</h1>
-          <p>管理当前 Bot 的本地 Skills 与精确版本引用。</p>
-        </div>
-        <div className="cc-skillhub-pickers">
-          <label className="cc-skillhub-bot-picker">
-            <span><Bot size={14} /> 当前 Bot</span>
-            <select
-              value={selectedBotUID}
-              disabled={loadingBots || bots.length === 0 || Boolean(sharingSkill)}
-              onChange={(event) => {
-                selectedBotUIDRef.current = event.target.value;
-                localRequestRef.current += 1;
-                setSelectedBotUID(event.target.value);
-              }}
-            >
-              {bots.length === 0 && <option value="">暂无自己拥有的 Bot</option>}
-              {bots.map((bot) => <option key={botUID(bot)} value={botUID(bot)}>{botLabel(bot)}</option>)}
-            </select>
-          </label>
-          <label className="cc-skillhub-bot-picker">
-            <span><FolderOpen size={14} /> 本地 XiaoBa</span>
-            <select
-              value={selectedDeviceID}
-              disabled={loadingDevices || devices.length === 0 || Boolean(sharingSkill)}
-              onChange={(event) => {
-                selectedDeviceIDRef.current = event.target.value;
-                localRequestRef.current += 1;
-                if (!event.target.value) setLocalSkillsError('');
-                setSelectedDeviceID(event.target.value);
-              }}
-            >
-              {devices.length === 0 && <option value="">暂无支持 SkillHub 的在线设备</option>}
-              {devices.length > 1 && <option value="">请选择要操作的设备</option>}
-              {devices.map((device) => (
-                <option key={device.deviceId} value={device.deviceId}>
-                  {device.displayName || device.deviceId}
-                </option>
-              ))}
-            </select>
-          </label>
-        </div>
-      </header>
-
-      {definitionError && <div className="cc-skillhub-alert error" role="alert">{definitionError}</div>}
-
-      <div className="cc-skillhub-workspace">
-        <section className="cc-skillhub-local">
-          <div className="cc-skillhub-section-heading">
-            <div>
-              <h2>本地 Skills</h2>
-              <span>当前 Bot 在 XiaoBa 中实际加载的工作区</span>
-            </div>
-            <div className="cc-skillhub-local-actions">
-              <button
-                type="button"
-                className="cc-skillhub-icon-button"
-                title="刷新本地 Skills"
-                aria-label="刷新本地 Skills"
-                onClick={() => loadLocalWorkspace()}
-                disabled={!selectedBotUID || !selectedDeviceID || loadingLocalSkills || Boolean(sharingSkill)}
-              >
-                <RefreshCw size={15} />
-                <span className="cc-skillhub-visually-hidden">刷新本地</span>
-              </button>
-            </div>
-          </div>
-          {localSkillsPath && (
-            <div className="cc-skillhub-local-path" title={localSkillsPath}>
-              <FolderOpen size={14} />
-              <code>{localSkillsPath}</code>
-              <button
-                type="button"
-                className="cc-skillhub-icon-button"
-                title="复制 Skills 路径"
-                aria-label="复制 Skills 路径"
-                onClick={copyLocalSkillsPath}
-              >
-                <Clipboard size={14} />
-                <span className="cc-skillhub-visually-hidden">复制 Skills 路径</span>
-              </button>
-            </div>
-          )}
-          {!loadingDevices && devices.length === 0 && (
-            <div className="cc-skillhub-alert error" role="alert">没有检测到支持该功能的在线 XiaoBa，请启动或更新本地 XiaoBa。</div>
-          )}
-          {!loadingDevices && devices.length > 1 && !selectedDeviceID && (
-            <div className="cc-skillhub-empty">请选择要操作的本地 XiaoBa，避免修改到其他电脑。</div>
-          )}
-          {localNotice && <div className="cc-skillhub-alert success" role="status">{localNotice}</div>}
-          {localSkillsError ? (
-            <div className="cc-skillhub-alert error" role="alert">{localSkillsError}</div>
-          ) : loadingLocalSkills ? (
-            <div className="cc-skillhub-empty">正在切换本地 Bot 并同步 Skills…</div>
-          ) : localSkills.length === 0 ? (
-            <div className="cc-skillhub-empty">当前本地工作区还没有可用 Skill。</div>
-          ) : (
-            <div className="cc-skillhub-local-grid">
-              {localSkills.map((skill) => {
-                const reference = skill.skillHub?.reference;
-                const installedReference = reference?.skillId ? installedByID.get(reference.skillId) : null;
-                const shared = isLocalSkillShared(skill, installedReference);
-                const canShare = skill.canShare !== false && skill.source !== 'system' && !shared;
-                const sharedVersion = skill.skillHub?.version || reference?.version;
-                return (
-                  <article key={`${skill.relativePath}:${skill.name}`} className="cc-skillhub-local-card">
-                    <div className="cc-skillhub-local-card-title">
-                      <strong>{skill.name}</strong>
-                      <span className={`cc-skillhub-status ${shared ? 'synced' : 'local'}`}>
-                        {shared ? `已分享 v${sharedVersion}` : '仅本地'}
-                      </span>
-                    </div>
-                    <p title={skill.description || '暂无描述'}>{skill.description || '暂无描述'}</p>
-                    <code title={skill.path || skill.relativePath}>{skill.relativePath || skill.path}</code>
-                    {shared ? (
-                      <div className="cc-skillhub-complete-state"><Check size={14} /> 已分享到 SkillHub</div>
-                    ) : canShare ? (
-                      <button
-                        type="button"
-                        disabled={!definitionReady || loadingLocalSkills || saving || Boolean(sharingSkill)}
-                        onClick={() => shareLocalSkill(skill)}
-                      >
-                        <Share2 size={14} />
-                        {sharingSkill === skill.name ? '正在分享…' : '分享到 SkillHub'}
-                      </button>
-                    ) : (
-                      <div className="cc-skillhub-unavailable-state">此 Skill 不可分享</div>
-                    )}
-                  </article>
-                );
-              })}
-            </div>
-          )}
-        </section>
-
-        <section className="cc-skillhub-installed">
-          <div className="cc-skillhub-section-heading">
-            <div>
-              <h2>当前 Bot 已配置</h2>
-              <span>{definition.skills.length} 个 Skill</span>
-            </div>
-            <button
-              type="button"
-              className="cc-skillhub-icon-button"
-              title="刷新 Bot 配置"
-              aria-label="刷新 Bot 配置"
-              onClick={() => loadDefinition()}
-              disabled={!selectedBotUID || loadingDefinition || saving || Boolean(sharingSkill)}
-            >
-              <RefreshCw size={15} />
-              <span className="cc-skillhub-visually-hidden">刷新</span>
-            </button>
-          </div>
-          {!selectedBotUID ? (
-            <div className="cc-skillhub-empty">先创建或选择一个自己拥有的 Bot。</div>
-          ) : loadingDefinition ? (
-            <div className="cc-skillhub-empty">正在读取 BotDefinition…</div>
-          ) : definition.skills.length === 0 ? (
-            <div className="cc-skillhub-empty">这个 Bot 还没有配置 Skill。</div>
-          ) : (
-            <div className="cc-skillhub-installed-list">
-              {definition.skills.map((skill) => (
-                <article key={skill.skillId} className="cc-skillhub-installed-item">
-                  <div>
-                    <strong>{skill.skillId}</strong>
-                    <span>v{skill.version}</span>
-                  </div>
-                  <button
-                    type="button"
-                    className="cc-skillhub-icon-button danger"
-                    title={`从当前 Bot 移除 ${skill.skillId}`}
-                    aria-label={`从当前 Bot 移除 ${skill.skillId}`}
-                    disabled={saving || Boolean(sharingSkill) || !definitionReady}
-                    onClick={() => removeSkill(skill.skillId)}
-                  >
-                    <Trash2 size={14} />
-                    <span className="cc-skillhub-visually-hidden">移除</span>
-                  </button>
-                </article>
-              ))}
-            </div>
-          )}
-        </section>
-      </div>
-
-      <section className="cc-skillhub-catalogue">
-        <div className="cc-skillhub-section-heading cc-skillhub-catalogue-heading">
-          <div>
-            <h2>全局 SkillHub</h2>
-            <span>搜索并绑定团队共享的 Skills</span>
-          </div>
-        </div>
-        <form
-          className="cc-skillhub-search"
-          onSubmit={(event) => {
-            event.preventDefault();
-            searchCatalogue(query).catch(() => {});
-          }}
-        >
-          <Search size={17} />
-          <input
-            value={query}
-            aria-label="搜索 Skill 名称或描述"
-            onChange={(event) => setQuery(event.target.value)}
-            placeholder="搜索 Skill 名称或描述"
-          />
-          <button type="submit" disabled={loadingCatalogue}>搜索</button>
-        </form>
-        {catalogueError ? (
-          <div className="cc-skillhub-alert error" role="alert">{catalogueError}</div>
-        ) : loadingCatalogue ? (
-          <div className="cc-skillhub-empty">正在读取 SkillHub…</div>
-        ) : catalogue.length === 0 ? (
-          <div className="cc-skillhub-empty">没有找到匹配的 Skill。</div>
-        ) : (
-          <div className="cc-skillhub-grid">
-            {catalogue.map((skill) => {
-              const installed = installedByID.get(skill.skillId);
-              const sameVersion = Boolean(
-                installed
-                && skill.latestVersion
-                && isExactHash(skill.contentHash)
-                && installed.version === skill.latestVersion
-                && installed.contentHash === skill.contentHash,
-              );
-              return (
-                <article key={skill.skillId} className="cc-skillhub-card">
-                  <div className="cc-skillhub-card-title">
-                    <Package size={18} />
-                    <div>
-                      <h3>{skill.displayName || skill.skillId}</h3>
-                      <span>{skill.skillId}</span>
-                    </div>
-                  </div>
-                  <p title={skill.description || '暂无描述'}>{skill.description || '暂无描述'}</p>
-                  <div className="cc-skillhub-card-meta">
-                    <span>{skill.author || 'SkillHub'}</span>
-                    <span>{skill.latestVersion ? `v${skill.latestVersion}` : '版本待确认'}</span>
-                  </div>
-                  {sameVersion ? (
-                    <div className="cc-skillhub-complete-state"><Check size={14} /> 已绑定</div>
-                  ) : (
-                    <button
-                      type="button"
-                      disabled={!definitionReady || saving || Boolean(sharingSkill)}
-                      onClick={() => installSkill(skill)}
-                    >
-                      <Link2 size={14} />
-                      {installed ? '更新绑定' : '绑定到当前 Bot'}
-                    </button>
-                  )}
-                </article>
-              );
-            })}
-          </div>
-        )}
-      </section>
-    </main>
-  );
+  return <SkillHubContent
+    actionNotice={actionNotice}
+    activeSection={activeSection}
+    addedSkillPresentationByID={addedSkillPresentationByID}
+    agentOptions={agentOptions}
+    catalogue={catalogue}
+    catalogueByID={catalogueByID}
+    catalogueError={catalogueError}
+    definition={definition}
+    definitionError={definitionError}
+    definitionReady={definitionReady}
+    devices={devices}
+    installedByID={installedByID}
+    isLocalSkillShared={isLocalSkillShared}
+    isLocalEnabled={true}
+    loadingBots={loadingBots}
+    loadingCatalogue={loadingCatalogue}
+    loadingDefinition={loadingDefinition}
+    loadingServerSkills={loadingServerSkills}
+    loadingDevices={loadingDevices}
+    loadingLocalSkills={loadingLocalSkills}
+    localNotice={localNotice}
+    localSkills={localSkills}
+    localSkillsError={localSkillsError}
+    localSkillsPath={localSkillsPath}
+    serverSkills={serverSkills}
+    serverSkillsError={serverSkillsError}
+    serverSkillsVisibility={serverSkillsVisibility}
+    onChangeSection={setActiveSection}
+    onCopySkill={copySkill}
+    onCopyLocalPath={copyLocalSkillsPath}
+    onInstallSkill={installSkill}
+    onQueryChange={setQuery}
+    onRefreshDefinition={() => loadDefinition()}
+    onRefreshServerSkills={() => loadServerSkills()}
+    onRefreshLocal={() => loadLocalWorkspace(
+      selectedBotUIDRef.current,
+      selectedDeviceIDRef.current,
+      { allowBotSwitch: true },
+    )}
+    onRemoveSkill={removeSkill}
+    onSearch={searchCatalogue}
+    onSelectAgent={(nextBotUID) => {
+      selectedBotUIDRef.current = nextBotUID;
+      requestedBotSwitchRef.current = nextBotUID;
+      rememberSkillHubBotUID(user?.uid, nextBotUID);
+      localRequestRef.current += 1;
+      setSelectedBotUID(nextBotUID);
+    }}
+    onSelectDevice={(deviceID) => {
+      selectedDeviceIDRef.current = deviceID;
+      localRequestRef.current += 1;
+      if (!deviceID) setLocalSkillsError('');
+      setSelectedDeviceID(deviceID);
+    }}
+    onShareLocalSkill={shareLocalSkill}
+    query={query}
+    saving={saving}
+    selectedAgentName={selectedAgent ? botLabel(selectedAgent) : ''}
+    selectedBotUID={selectedBotUID}
+    selectedDeviceID={selectedDeviceID}
+    sharingSkill={sharingSkill}
+    skillAction={skillAction}
+  />;
 }

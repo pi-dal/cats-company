@@ -31,9 +31,18 @@ const SPREADSHEET_MIME_TYPES = new Set([
   'application/vnd.ms-excel',
   'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
 ]);
-const HTML_PREVIEW_SANDBOX = 'allow-scripts allow-forms allow-popups allow-modals';
+// Sandbox presets for embedded previews. The axis that matters is whether the
+// frame is allowed to keep its own origin.
+// - OPAQUE_ORIGIN_SANDBOX: no `allow-same-origin`, so the frame runs with an
+//   opaque origin and cannot reach the workspace that hosts the preview panel.
+//   Used for same-origin Artifacts and HTML reports (srcDoc frames are opaque
+//   regardless).
+// - CROSS_ORIGIN_ARTIFACT_SANDBOX: adds `allow-same-origin`, so a genuinely
+//   cross-origin Artifact keeps its own distinct origin (never the host) and
+//   runs under `credentialless`.
+const OPAQUE_ORIGIN_SANDBOX = 'allow-scripts allow-forms allow-popups allow-modals';
 const FOCUSABLE_SELECTOR = 'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
-const REMOTE_ARTIFACT_PREVIEW_SANDBOX = `${HTML_PREVIEW_SANDBOX} allow-same-origin`;
+const CROSS_ORIGIN_ARTIFACT_SANDBOX = `${OPAQUE_ORIGIN_SANDBOX} allow-same-origin`;
 const trustedArtifactPreviewPayloads = new WeakSet();
 
 function shouldHideToolProgressName(name) {
@@ -1803,10 +1812,13 @@ export function previewFileDescriptor(payload) {
     && isHtml
     && Boolean(normalizeArtifactURL(url));
   const isSameOriginRemoteArtifact = isManagedRemoteArtifact && isSameOriginURL(url);
-  const isRemoteArtifact = isManagedRemoteArtifact && !isSameOriginRemoteArtifact;
+  // Managed Artifacts are rendered in the side preview regardless of origin.
+  // Same-origin content deliberately keeps the opaque sandbox origin so the
+  // generated page cannot reach the workspace that hosts the preview panel.
+  const isRemoteArtifact = isManagedRemoteArtifact;
   const spreadsheetKind = isCsvFile(payload, ext) ? 'csv' : isXlsxFile(payload, ext) ? 'xlsx' : '';
   const canPreview = isManagedRemoteArtifact
-    ? isRemoteArtifact
+    ? true
     : isPreviewableFile(payload, ext) && isTrustedPreviewURL(url);
   return {
     payload,
@@ -2169,6 +2181,7 @@ export function FilePreviewPanel({ file, onBack, onClose, backgroundRef }) {
   const isMarkdown = descriptor?.isMarkdown || false;
   const isSpreadsheet = descriptor?.isSpreadsheet || false;
   const isRemoteArtifact = descriptor?.isRemoteArtifact || false;
+  const isSameOriginRemoteArtifact = descriptor?.isSameOriginRemoteArtifact || false;
   const meta = descriptor?.meta || artifactMeta(file || {});
   const sizeStr = descriptor?.sizeStr || '';
   const downloadURL = descriptor?.downloadURL || url;
@@ -2445,7 +2458,7 @@ export function FilePreviewPanel({ file, onBack, onClose, backgroundRef }) {
                 src={url}
                 className="v3-file-preview-frame"
                 title="Cloud Artifact Preview"
-                sandbox={REMOTE_ARTIFACT_PREVIEW_SANDBOX}
+                sandbox={isSameOriginRemoteArtifact ? OPAQUE_ORIGIN_SANDBOX : CROSS_ORIGIN_ARTIFACT_SANDBOX}
                 credentialless=""
                 referrerPolicy="no-referrer"
                 tabIndex={isSheetMode ? -1 : undefined}
@@ -2476,7 +2489,7 @@ export function FilePreviewPanel({ file, onBack, onClose, backgroundRef }) {
             <iframe
               className="v3-file-preview-frame"
               title="HTML Report Preview"
-              sandbox={HTML_PREVIEW_SANDBOX}
+              sandbox={OPAQUE_ORIGIN_SANDBOX}
               referrerPolicy="no-referrer"
               srcDoc={textContent || '<!doctype html><meta charset="utf-8"><body></body>'}
             />

@@ -261,6 +261,7 @@ export default function MessagesView({
   cloudArtifactsRequest,
   messageLocationRequest,
   onBackToSearch,
+  composerDraftStore,
 }) {
   const [input, setInput] = useState('');
   const [messages, setMessages] = useState([]);
@@ -359,9 +360,9 @@ export default function MessagesView({
   const questionIndexLoadingRef = useRef(false);
   const questionIndexAbortControllerRef = useRef(null);
   const questionJumpAbortControllerRef = useRef(null);
-  const composerDraftsRef = useRef(new Map());
-  const structuredMentionDraftsRef = useRef(new Map());
-  const attachmentDraftsRef = useRef(new Map());
+  const composerDraftsRef = useRef(null);
+  const structuredMentionDraftsRef = useRef(null);
+  const attachmentDraftsRef = useRef(null);
   const pendingAttachmentsRef = useRef([]);
   const previewWidthRef = useRef(previewWidth);
   const phoneUploadFileKeysRef = useRef(new Set());
@@ -369,6 +370,12 @@ export default function MessagesView({
   const phoneUploadTopicRef = useRef('');
   const phoneUploadSyncRef = useRef(null);
   const sendInFlightRef = useRef(false);
+
+  if (composerDraftsRef.current === null) {
+    composerDraftsRef.current = composerDraftStore?.inputDrafts || new Map();
+    structuredMentionDraftsRef.current = composerDraftStore?.structuredMentionDrafts || new Map();
+    attachmentDraftsRef.current = composerDraftStore?.attachmentDrafts || new Map();
+  }
 
   useEffect(() => {
     let cancelled = false;
@@ -391,23 +398,22 @@ export default function MessagesView({
     };
   }, [topic]);
 
-  const updateComposerDraft = useCallback((draftTopic, value) => {
+  const updateDraftStore = useCallback((storeRef, draftTopic, value, hasValue) => {
     if (!draftTopic) return;
-    if (value) {
-      composerDraftsRef.current.set(draftTopic, value);
+    if (hasValue(value)) {
+      storeRef.current.set(draftTopic, value);
     } else {
-      composerDraftsRef.current.delete(draftTopic);
+      storeRef.current.delete(draftTopic);
     }
   }, []);
 
+  const updateComposerDraft = useCallback((draftTopic, value) => {
+    updateDraftStore(composerDraftsRef, draftTopic, value, Boolean);
+  }, [updateDraftStore]);
+
   const updateStructuredMentionDraft = useCallback((draftTopic, selections) => {
-    if (!draftTopic) return;
-    if (Array.isArray(selections) && selections.length > 0) {
-      structuredMentionDraftsRef.current.set(draftTopic, selections);
-    } else {
-      structuredMentionDraftsRef.current.delete(draftTopic);
-    }
-  }, []);
+    updateDraftStore(structuredMentionDraftsRef, draftTopic, selections, (v) => Array.isArray(v) && v.length > 0);
+  }, [updateDraftStore]);
 
   const updateAttachmentDraft = useCallback((draftTopic, nextValue) => {
     if (!draftTopic) return [];

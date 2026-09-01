@@ -212,6 +212,15 @@ function TinodeWebApp() {
   const [messageLocationRequest, setMessageLocationRequest] = useState(null);
   const messageLocationSequenceRef = useRef(0);
   const taskDraftSequenceRef = useRef(0);
+  const composerDraftStoreRef = useRef(null);
+
+  if (composerDraftStoreRef.current === null) {
+    composerDraftStoreRef.current = {
+      inputDrafts: new Map(),
+      structuredMentionDrafts: new Map(),
+      attachmentDrafts: new Map(),
+    };
+  }
 
   useEffect(() => {
     const userId = String(user?.uid || '');
@@ -577,6 +586,9 @@ function TinodeWebApp() {
     setUser(null);
     setOnlineUsers({});
     setTaskDraft(null);
+    composerDraftStoreRef.current.inputDrafts.clear();
+    composerDraftStoreRef.current.structuredMentionDrafts.clear();
+    composerDraftStoreRef.current.attachmentDrafts.clear();
     setActiveView('chats');
     setActiveTopic(null);
   }, [setActiveTopic]);
@@ -1220,6 +1232,7 @@ function TinodeWebApp() {
                 cloudArtifactsRequest={cloudArtifactsRequest}
                 messageLocationRequest={messageLocationRequest}
                 onBackToSearch={() => setSearchOpen(true)}
+                composerDraftStore={composerDraftStoreRef.current}
               />
             ) : (
               <>

@@ -47,6 +47,10 @@ server/cmd/conversation-share-assets/
 # Local AI tooling
 .claude/
 CLAUDE.md
+.pi-subagents/
+.worktrees/
+.pnpm-store/
+__pycache__/
 packages/skills/scripts/__pycache__/
 
 # 部署脚本（包含敏感信息）

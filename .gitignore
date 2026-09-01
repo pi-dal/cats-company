@@ -51,7 +51,6 @@ CLAUDE.md
 .worktrees/
 .pnpm-store/
 __pycache__/
-packages/skills/scripts/__pycache__/
 
 # 部署脚本（包含敏感信息）
 deploy/*.sh

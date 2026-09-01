@@ -131,7 +131,33 @@ Authorization: ApiKey <api_key>
 | POST | `/api/friends/block` | 屏蔽用户 | `{ "user_id": 2 }` |
 | DELETE | `/api/friends/remove?user_id={id}` | 删除好友 | - |
 
-### 2.5 消息接口（需要鉴权）
+### 2.5 会话接口（需要鉴权）
+
+#### GET /api/conversations
+
+获取当前用户可见的会话列表（包含最新消息）。
+
+#### PUT /api/conversations/notification-preferences
+
+> ⚠️ **未上线（计划中）。** 当前版本尚未实现该端点，实际请求返回 404；
+> `GET /api/conversations` 也暂不返回 `notifications_muted` 字段。该功能实现位于独立的
+> 未合并分支中，上线前请勿将本文档视为已发布契约。
+
+更新当前账户对一个会话的通知屏蔽状态。当前用户必须是该 P2P 会话的好友（或自己拥有的
+Bot），或属于该群组。
+
+```json
+// Request
+{ "topic_id": "p2p_1_2", "muted": true }
+
+// Response 200
+{ "topic_id": "p2p_1_2", "notifications_muted": true }
+```
+
+请求体缺少 `topic_id` 或 `muted` 时返回 400；会话不可访问时返回 403；存储不可用时返回
+500（服务未实现该能力时返回 501）。
+
+### 2.6 消息接口（需要鉴权）
 
 #### POST /api/messages/send
 
@@ -149,7 +175,7 @@ REST 备用通道（推荐使用 WebSocket）。
 
 获取消息历史。
 
-### 2.6 群组接口（需要鉴权）
+### 2.7 群组接口（需要鉴权）
 
 | 方法 | 路径 | 说明 | 请求体 |
 |------|------|------|--------|
@@ -165,7 +191,7 @@ REST 备用通道（推荐使用 WebSocket）。
 | POST | `/api/groups/disband` | 解散群组 | `{ "group_id": 1 }` |
 | POST | `/api/groups/role` | 修改角色 | `{ "group_id": 1, "user_id": 4, "role": "admin" }` |
 
-### 2.7 文件上传（需要鉴权，支持 JWT 和 API Key）
+### 2.8 文件上传（需要鉴权，支持 JWT 和 API Key）
 
 #### POST /api/upload?type={image|file}
 
@@ -199,9 +225,9 @@ Raw 上传在应用层只在实际读取超过限制时返回 `upload_too_large`
 
 访问已上传的文件（无需鉴权）。
 
-### 2.8 Bot 管理接口
+### 2.9 Bot 管理接口
 
-#### 2.8.1 用户端 Bot 管理（需要用户 JWT 鉴权）
+#### 2.9.1 用户端 Bot 管理（需要用户 JWT 鉴权）
 
 用户可以自行创建、管理自己的 Bot。
 
@@ -280,7 +306,7 @@ Raw 上传在应用层只在实际读取超过限制时返回 `upload_too_large`
 { "error": "Agent 所有者未公开技能列表" }
 ```
 
-#### 2.8.2 管理员 Bot 管理（需要管理员鉴权）
+#### 2.9.2 管理员 Bot 管理（需要管理员鉴权）
 
 | 方法 | 路径 | 说明 |
 |------|------|------|

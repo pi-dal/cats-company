@@ -226,6 +226,7 @@ Platform 服务端、WebApp 与部署配置就在本仓库。当前尚未提供�
 - [Platform Quickstart](docs/QUICKSTART.md)
 - [Platform API](docs/API.md)
 - [Account Center & Auth](docs/ACCOUNT_CENTER_AUTH.md)
+- [Service Token 与用户资料查询](docs/SERVICE_TOKEN_GUIDE.md)
 - [XiaoBa Runtime architecture](https://github.com/buildsense-ai/XiaoBa-CLI/tree/main/docs)
 
 ---
